@@ -1,0 +1,40 @@
+# Required to make this package install correctly with `pip install -e .`
+# https://github.com/pypa/pip/issues/11457
+[build-system]
+requires = ["setuptools >= 64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wescon_tools"
+version = "0.1"
+description = "WesCon tools and analysis"
+authors = [
+    { name = "Mark Muetzelfeldt", email = "mark.muetzelfeldt@reading.ac.uk" },
+    { name = "Brian Lo", email = "chunhaybrian.lo@reading.ac.uk" }
+]
+maintainers = [
+    { name = "Mark Muetzelfeldt", email = "mark.muetzelfeldt@reading.ac.uk" },
+    { name = "Brian Lo", email = "chunhaybrian.lo@reading.ac.uk" }
+]
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ['LICENSE']
+readme = "README.md"
+keywords = ["radar", "WesCon"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "Natural Language :: English",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Atmospheric Science"
+]
+
+[project.urls]
+Homepage = "https://github.com/markmuetz/wescon-tools"
+
+# [project.scripts]
+
+# [tool.setuptools]
+# packages = ["wescon_tools"]
+
