@@ -1,0 +1,29 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# setup files.
+wescon_tools.egg-info
+
+# vim
+.*.sw?
+
+# PyCharm
+.idea
+
+# remake.
+.remake
+
+
+# IPYNB notebooks:
+.ipynb_checkpoints
+
+# local tmp files
+data
+figs
+.results_cache
+.pixel_inputs_cache*.pkl
+
+# These files sometimes end up on JASMIN:
+.nfs*
