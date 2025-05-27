@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from input.camra.load_camra_l1 import CamraLoader as CLP
+from src.input.camra.load_camra_l1 import CamraLoader as CLP
 
 
 class CamraUpdrafts:
