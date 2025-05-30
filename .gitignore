@@ -12,9 +12,11 @@ wescon_tools.egg-info
 # PyCharm
 .idea
 
+# virtual envs
+.venv
+
 # remake.
 .remake
-
 
 # IPYNB notebooks:
 .ipynb_checkpoints
