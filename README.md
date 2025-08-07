@@ -7,7 +7,7 @@ This repository contains a number of tools for using the Met Office RadarNet rai
 
 In your favourite Python environment:
 
-`pip install git+https://github.com/markmuetz/wescon-tools.git#egg=wescon-tools`
+`pip install git+https://github.com/ParaChute-UK/wescon-tools.git#egg=wescon-tools`
 
 ## Structure
 
