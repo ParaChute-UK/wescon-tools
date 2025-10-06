@@ -8,8 +8,6 @@ import pandas as pd
 import remake
 from remake.util import util
 
-PRODUCTION = False
-
 
 def to_netcdf_tmp_then_copy(ds, outpath, encoding=None):
     """Helper to write output to a JASMIN scratch dir, then copy to desired location.
@@ -58,15 +56,6 @@ def to_netcdf_tmp_then_copy(ds, outpath, encoding=None):
         'output path': str(output_path_actual),
         'contact': 'mark.muetzelfeldt@reading.ac.uk',
     }
-    if PRODUCTION:
-        metadata_attrs.update({
-            'production_mcs_prime_git_info': str(mcs_prime_git_info),
-            'production_remake_git_info': str(remake_git_info),
-            'production_conda_env_details': conda_env_details,
-            'production_machine_lspcu': machine_lspcu,
-            'production_machine_lsb_release': machine_lsb_release,
-            'production_machine_uname': machine_uname,
-        })
     ds.attrs.update(metadata_attrs)
 
     ds.to_netcdf(tmppath, encoding=encoding)

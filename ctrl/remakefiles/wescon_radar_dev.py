@@ -17,6 +17,7 @@ from wescon_tools.custom_osgb import CustomOSGB
 from wescon_tools.flow_interp import FlowInterp
 from wescon_tools.radar_intersection import RadarIntersectionCalculator, RadarIntersection
 from wescon_tools.util import to_netcdf_tmp_then_copy
+from wescon_tools.radar_util import add_cartesian_coords, RadarRegridder
 
 # TODO: nimrod -> radarnet (involves moving some files around).
 
@@ -36,18 +37,6 @@ LYN_Y = 178939
 
 slurm_config = {'account': 'mcs_prime', 'partition': 'standard', 'qos': 'short', 'mem': 64000}
 rmk = Remake(config=dict(slurm=slurm_config))
-
-
-def convert_kepler_radar_coords(ds):
-    # Note, this is *not* the radius of the earth, because it includes a correction for refractive index
-    # I believe.
-    # TODO: check whether calibration is needed.
-    r_earth = 6371.0 * (4 / 3)
-    ds['rangekm'] = ds.range / 1000.0
-    ds['r'] = np.cos(ds.elevation * np.pi / 180) * ds.rangekm
-    ds['x'] = np.sin(ds.azimuth * np.pi / 180) * np.cos(ds.elevation * np.pi / 180) * ds.rangekm
-    ds['y'] = np.cos(ds.azimuth * np.pi / 180) * np.cos(ds.elevation * np.pi / 180) * ds.rangekm
-    ds['z'] = ds.elevation * np.pi / 180 * ds.rangekm + np.sqrt(ds.r**2 + r_earth**2) - r_earth
 
 
 def xr_find_cloud_objects(ds):
@@ -189,14 +178,14 @@ class RegridCAMRaKeplerL1(Rule):
         else:
             x = np.linspace(0, 50, 500 * 4 + 1)
         z = np.linspace(0, 12, 120 * 3 + 1)
-        xx, zz = np.meshgrid(x, z)
+        regridder = RadarRegridder(x, z)
 
         for i, radar_path in enumerate(radar_paths):
             ds = xr.open_dataset(radar_path)
             logger.debug(ds)
             time = pd.Timestamp(ds.time.values[0])
             logger.debug(time)
-            convert_kepler_radar_coords(ds)
+            add_cartesian_coords(ds)
 
             logger.debug('* regrid RHI Z')
             field_name_map = {
@@ -220,7 +209,7 @@ class RegridCAMRaKeplerL1(Rule):
                 logger.debug(f'  - regrid {field} with nans')
                 field_name = field_name_map[radar][field]
                 attrs[field] = ds[field_name].attrs
-                regridded_fields[field] = RegridCAMRaKeplerL1.regrid_field(ds, field_name, points, xx, zz)
+                regridded_fields[field] = regridder.regrid_field(ds, field_name, points, log_linear_remap=field == 'Z')
 
             logger.debug('* flow interp nimrod')
             rain_times = pd.DatetimeIndex(da_rain.time)
