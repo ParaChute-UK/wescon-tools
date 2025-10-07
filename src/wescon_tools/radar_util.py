@@ -60,6 +60,7 @@ class RadarRegridder:
         :return: The regridded field, with appropriate values set to NaN based on the
                  maximum and minimum elevation bounds.
         """
+        # TODO: Should points be passed in here or in constructor?
         if log_linear_remap:
             # Regridding works better on linear Z, ZED_H is log Z. tx->regrid->tx back.
             field = 10 ** (ds[field_name].values / 10)
