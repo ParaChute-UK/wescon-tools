@@ -328,8 +328,8 @@ def plot_matching_pair(ds_cam, ds_kep):
 
 
 def plot_joint(ds_cam, ds_kep):
-    camZ = ds_cam.rhi_Z[0].values
-    kepZ = ds_kep.rhi_Z[0].values
+    camZ = ds_cam.rhi_Z.values
+    kepZ = ds_kep.rhi_Z.values
     keep = ~np.isnan(camZ) & ~np.isnan(kepZ) & (camZ > 0) & (kepZ > 0)
     x = camZ[keep]
     y = kepZ[keep]
@@ -397,6 +397,27 @@ class MatchAnalyses(Rule):
             plt.savefig(outdir / f'cam_kep_overlaid_{case}_{i}.png')
 
             plt.close('all')
+        Path(outputs['dummy']).write_text('Finished')
+
+
+class MatchesForCaseAnalyses(Rule):
+    rule_matrix = {'case': conf.KASBEX_CASES}
+    rule_inputs = FindMatches.rule_outputs
+    rule_outputs = {'dummy': '/gws/nopw/j04/parachute/mmuetz/data/kasbex/matches_for_case_analysis/'
+                             '{case}/match_analysis_dummy_{case}.txt'}
+
+    @staticmethod
+    def rule_run(inputs, outputs, case):
+        scans = pd.read_hdf(inputs['scans'], 'scans')
+        matches = scans[scans.match]
+        outdir = Path(outputs['dummy']).parent
+        ds_cam = xr.open_mfdataset(matches.cam_path.values.tolist())
+        ds_kep = xr.open_mfdataset(matches.kep_path.values.tolist())
+
+        ds_cam = ds_cam.sel(x=slice(0, 50))
+
+        plot_joint(ds_cam, ds_kep)
+        plt.savefig(outdir / f'joint_{case}.png')
         Path(outputs['dummy']).write_text('Finished')
 
 
