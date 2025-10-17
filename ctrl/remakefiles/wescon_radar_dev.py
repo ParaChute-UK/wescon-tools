@@ -8,7 +8,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import xarray as xr
-from scipy import ndimage
 from scipy.interpolate import griddata
 
 import proj_config as conf
@@ -17,7 +16,7 @@ from wescon_tools.custom_osgb import CustomOSGB
 from wescon_tools.flow_interp import FlowInterp
 from wescon_tools.radar_intersection import RadarIntersectionCalculator, RadarIntersection
 from wescon_tools.util import to_netcdf_tmp_then_copy
-from wescon_tools.radar_util import add_cartesian_coords, RadarRegridder
+from wescon_tools.radar_util import add_cartesian_coords, RadarRegridder, xr_find_cloud_objects
 
 # TODO: nimrod -> radarnet (involves moving some files around).
 
@@ -38,73 +37,6 @@ LYN_Y = 178939
 slurm_config = {'account': 'mcs_prime', 'partition': 'standard', 'qos': 'short', 'mem': 64000}
 rmk = Remake(config=dict(slurm=slurm_config))
 
-
-def xr_find_cloud_objects(ds):
-    xx, zz = np.meshgrid(ds.x, ds.z)
-    dx = ds.x.values[1] - ds.x.values[0]
-    dz = ds.z.values[1] - ds.z.values[0]
-    dA = dx * dz
-    cloud_labels, lmax = ndimage.label(ds.rhi_Z > 10)
-    keys = [
-        'cloud_area',
-        'cloud_min_x',
-        'cloud_max_x',
-        'cloud_mean_x',
-        'cloud_min_z',
-        'cloud_max_z',
-        'cloud_mean_z',
-        'cloud_min_Z',
-        'cloud_max_Z',
-        'cloud_mean_Z',
-    ]
-    reflectivity_threshs = [10, 35, 55]
-    cloud_objs = {'cloud_label': (['time', 'cloud_id'], np.full((1, 20), np.nan))}
-    for key in keys:
-        cloud_objs[key] = (
-            ['time', 'cloud_id', 'reflectivity_thresh'],
-            np.full((1, 20, len(reflectivity_threshs)), np.nan),
-        )
-
-    cld_idx = 0
-    for cloud_label in range(1, lmax + 1):
-        cloud_mask = cloud_labels == cloud_label
-        area = cloud_mask.sum() * dA
-        minx = xx[cloud_mask].min()
-        # Apply some criteria as to whether we record cloud objs.
-        # Must have area > 1 km2, and not closer than 20 km to radar.
-        if area > 1 and minx > 20:
-            cloud_objs['cloud_label'][1][0, cld_idx] = cloud_label
-            for thresh_idx, dBZthresh in enumerate(reflectivity_threshs):
-                xs = xx[cloud_mask & (ds.rhi_Z.values > dBZthresh)]
-                zs = zz[cloud_mask & (ds.rhi_Z.values > dBZthresh)]
-                Zs = ds.rhi_Z.values[cloud_mask & (ds.rhi_Z.values > dBZthresh)]
-
-                if len(xs):
-                    cloud_objs['cloud_area'][1][0, cld_idx, thresh_idx] = (Zs > dBZthresh).sum() * dA
-                    cloud_objs['cloud_min_x'][1][0, cld_idx, thresh_idx] = xs.min()
-                    cloud_objs['cloud_max_x'][1][0, cld_idx, thresh_idx] = xs.max()
-                    cloud_objs['cloud_mean_x'][1][0, cld_idx, thresh_idx] = xs.mean()
-                    cloud_objs['cloud_min_z'][1][0, cld_idx, thresh_idx] = zs.min()
-                    cloud_objs['cloud_max_z'][1][0, cld_idx, thresh_idx] = zs.max()
-                    cloud_objs['cloud_mean_z'][1][0, cld_idx, thresh_idx] = zs.mean()
-                    cloud_objs['cloud_min_Z'][1][0, cld_idx, thresh_idx] = Zs.min()
-                    cloud_objs['cloud_max_Z'][1][0, cld_idx, thresh_idx] = Zs.max()
-                    cloud_objs['cloud_mean_Z'][1][0, cld_idx, thresh_idx] = Zs.mean()
-                else:
-                    for key in keys:
-                        cloud_objs[key][1][0, cld_idx, thresh_idx] = np.nan
-            cld_idx += 1
-            if cld_idx >= 20:
-                raise Exception('cld_idx > 20')
-    cloud_objs = xr.Dataset(
-        cloud_objs,
-        coords=dict(
-            time=('time', [pd.Timestamp(ds.time.values)]),
-            reflectivity_thresh=('reflectivity_thresh', reflectivity_threshs, {'units': 'dBZ'}),
-        ),
-    )
-
-    return cloud_labels, cloud_objs
 
 class CasePathsMap:
     basedirs = {
@@ -262,27 +194,6 @@ class RegridCAMRaKeplerL1(Rule):
 
         # dsout = xr.concat(datasets, dim='time')
         # to_netcdf_tmp_then_copy(dsout, outputs['griddata'])
-
-    @staticmethod
-    def regrid_field(ds, field_name, points, xx, zz):
-        if field_name.startswith('DBZ'):
-            # Regridding works better on linear Z, ZED_H is log Z. tx->regrid->tx back.
-            field = 10 ** (ds[field_name].values / 10)
-        else:
-            field = ds[field_name].values
-
-        field_grid = griddata(points, field.flatten(), (xx, zz), method='nearest')
-        field_grid2 = griddata(points, field.flatten(), (xx, zz), method='linear')  # <- this gets nans!
-        if field_name.startswith('DBZ'):
-            # Convert back to dBZ.
-            field_grid = np.log10(field_grid) * 10
-
-        # Make sure values outside the min/max elevation are set to nan.
-        field_grid_nan = field_grid.copy()
-        field_grid_nan[np.isnan(field_grid2)] = np.nan
-        field_grid_nan[np.arctan(zz / xx) > ds.elevation.values.max() * np.pi / 180] = np.nan
-        field_grid_nan[np.arctan(zz / xx) < ds.elevation.values.min() * np.pi / 180] = np.nan
-        return field_grid_nan
 
 
 def plot_nimrod_rhi_transect(ds, radar):

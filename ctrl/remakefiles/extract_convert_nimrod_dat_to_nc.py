@@ -13,7 +13,7 @@ from remake.util import sysrun
 
 from wescon_tools.radarnet_composite import RadarNetComposite, RadarNetDataReadError
 from wescon_tools import util
-from proj_config import PATHS, CASES
+from proj_config import PATHS, CASES, KASBEX_CASES
 
 # Access has been suspended. I can still download each file through the web interface tho ¯\_(ツ)_/¯
 # BADC_DATADIR = Path('/badc/ukmo-nimrod/data/composite/uk-1km/')
@@ -37,7 +37,7 @@ class ExtractConvertRadarNet(Rule):
     rule_outputs = {'out_log': str(OUTDIR / '{case}' / 'metoffice-c-band-rain-radar_uk_{case}.log')}
 
     rule_matrix = {
-        'case': CASES,
+        'case': CASES + KASBEX_CASES,
     }
 
     @staticmethod
