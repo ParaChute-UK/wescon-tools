@@ -95,6 +95,7 @@ class RegridCAMRaKeplerL1(Rule):
 
     @staticmethod
     def rule_run(inputs, outputs, case, radar, batch_idx):
+        print(case)
         da_rain = xr.open_dataarray(inputs['nimrod'])
 
         domain_halfwidth = 180e3
@@ -468,3 +469,83 @@ class PlotCamraKeplerMatch(Rule):
                 print(figpath)
                 plt.savefig(figpath)
         outputs['output'].touch()
+
+
+def find_brackets(df):
+    currbracket = 0
+    nbracket = 0
+    bracket = [currbracket]
+    bracket_idx = [nbracket]
+    for i in range(1, len(df.az.values)):
+        daz = df.delta_az.values[i]
+        # TODO: Correct limits here?
+        if 0.1 < daz < 0.8:
+            if nbracket < 3:
+                nbracket += 1
+            else:
+                nbracket = 0
+                currbracket += 1
+        else:
+            nbracket = 0
+            currbracket += 1
+        bracket.append(currbracket)
+        bracket_idx.append(nbracket)
+    df['bracket'] = bracket
+    df['bracket_idx'] = bracket_idx
+
+
+class FindCandidateDeltaZ(Rule):
+    rule_matrix = {'case': conf.CASES}
+    rule_inputs = {}
+    @staticmethod
+    def rule_outputs(case):
+        outdir = conf.PATHS['outdir'] / 'wescon_radar_dev' / case / 'camra' / 'deltaZ_candidate'
+        return {
+            f'scans': outdir / f'{case}_scans.hdf',
+            f'candidates': outdir / f'{case}_deltaZ_candidates.hdf',
+        }
+
+    @staticmethod
+    def rule_run(inputs, outputs, case):
+        # Dir of raw data.
+        # basedir = Path(f'/gws/pw/j07/woest/data/ncas-radar-camra-1/L1_final/iop/data/{case}')
+        basedir = Path(f'/gws/nopw/j04/mcs_prime/mmuetz/upflo/data/upflo_wp1_output/wescon_radar_dev/{case}/camra')
+        paths = sorted(basedir.glob('*.nc'))
+
+        time = []
+        az = []
+        for p in paths:
+            ds = xr.open_dataset(p)
+            # For raw data dir.
+            # time.append(pd.Timestamp(ds.time.mean().values.item()))
+            # az.append(ds.azimuth.mean().values.item())
+            time.append(pd.Timestamp(ds.time.values.item()))
+            az.append(ds.rhi_mean_az.values.item())
+        df = pd.DataFrame(data={'path': [str(p) for p in paths], 'time': time, 'az': az})
+        df['delta_az'] = df.az.diff()
+
+        # Does the job of finding individual brackets and adding a column to the df.
+        find_brackets(df)
+
+        # Now one row per bracket.
+        brackets = df[['time', 'az', 'bracket']].groupby('bracket').mean()
+        bcount = df.groupby('bracket').size()
+        brackets['count'] = bcount
+        brackets['complete'] = bcount == 4
+
+        brackets['delta_time'] = brackets.time.diff()
+        brackets['delta_az'] = brackets.az.diff()
+
+        # Candidate if the below conditions are met.
+        brackets['deltaZ_candidate'] = (
+                (brackets.delta_time < pd.Timedelta(minutes=3)) &
+                (brackets.delta_az < 5) &
+                # Only a candidate if both curr and prev rows are complete.
+                (brackets.complete & brackets.complete.shift(1).fillna(False))
+        )
+        print(df)
+        print(brackets)
+        df.to_hdf(outputs['scans'], key='scans')
+        brackets.to_hdf(outputs['candidates'], key='candidates')
+
+

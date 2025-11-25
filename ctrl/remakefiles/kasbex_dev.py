@@ -23,7 +23,6 @@ rmk = Remake(config=dict(slurm=slurm_config))
 
 LOAD_RADARNET = False
 
-
 def get_time_az(paths):
     time = []
     az = []
@@ -45,12 +44,15 @@ def get_time_az(paths):
 
 
 def find_matches(good_cam_paths, camtime, camaz, good_kep_paths, keptime, kepaz, tthresh=60, azthresh=0.2):
+    """Finds all matches where kep times which are within tthresh of cam times (s), and az < 0.2"""
+    # No longer symmetric in time - i.e. keptime must be greater than camtime.
     matches = []
     for i in range(len(camtime)):
         t0 = camtime[i]
         az0 = camaz[i]
         # print(t0, az0)
-        tmatch = np.abs(t0 - keptime) < pd.Timedelta(seconds=tthresh)
+        # tmatch = np.abs(t0 - keptime) < pd.Timedelta(seconds=tthresh)
+        tmatch = (np.abs(t0 - keptime) < pd.Timedelta(seconds=tthresh)) & (t0 < keptime)
         azmatch = np.abs(az0 - kepaz) < azthresh
         match = tmatch & azmatch
         if match.sum() == 1:
@@ -162,7 +164,7 @@ class RegridCAMRaKeplerL1(Rule):
     @staticmethod
     def rule_outputs(case, radar, batch_idx):
         paths = cpmap(case, radar)[batch_idx]
-        return {f'gridded_data{i}': conf.PATHS['outdir'] / 'kasbex' / case / radar / f'gridded_{path.stem}.nc'
+        return {f'gridded_data{i}': conf.PATHS['kasbexoutdir'] / 'regridded' / case / radar / f'gridded_{path.stem}.nc'
                 for i, path in enumerate(paths)}
 
     @staticmethod
@@ -285,11 +287,10 @@ class FindMatches(Rule):
                 inputs.update(RegridCAMRaKeplerL1.rule_outputs(case, radar, batch_idx))
         return inputs
 
-    rule_outputs = {'scans': '/gws/nopw/j04/parachute/mmuetz/data/kasbex/camra_kepler_scans/camra_kepler_scans_{case}.hdf'}
+    rule_outputs = {'scans': str(conf.PATHS['kasbexoutdir'] / 'camra_kepler_scans/camra_kepler_scans_{case}.hdf')}
 
     @staticmethod
     def rule_run(inputs, outputs, case):
-        # kasbex_dir = Path('/gws/nopw/j04/ncas_radar_vol2/cjw/projects/kasbex')
         cam_dir = conf.PATHS['outdir'] / 'kasbex' / case / 'camra'
         kep_dir = conf.PATHS['outdir'] / 'kasbex' / case / 'kepler'
         cam_paths = sorted(cam_dir.glob('gridded_ncas-radar-camra-1_cao_*_rhi_l1_v1.0.1.nc'))
@@ -301,9 +302,28 @@ class FindMatches(Rule):
         print('# kep', len(good_kep_paths))
 
         scans = find_matches(good_cam_paths, camtime, camaz, good_kep_paths, keptime, kepaz)
-        print('# matches', len(scans[scans.match]))
+        matches = scans[scans.match]
+        print('# matches', len(matches))
+        # Make sure that no kep_path is matched to more than one cam_path.
+        assert matches.kep_path.duplicated().sum() == 0
 
         scans.to_hdf(outputs['scans'], key='scans')
+
+
+def plot_rhi(ds, match):
+    fig, ax0 = plt.subplots(1, 1, figsize=(6, 6), layout='constrained')
+    im = ax0.pcolormesh(ds.x, ds.z, ds.rhi_Z[0], vmin=-30, vmax=50, shading='nearest', cmap='inferno')
+
+    ax0.set_ylim(0, 10)
+    ax0.set_xlim(0, 50)
+
+    time = pd.Timestamp(ds['time'].values.item())
+    az = ds['rhi_mean_az'].values.item()
+    ax0.set_title(f'CAMRa {time:%Y-%m-%d %H:%M:%S}, azimuth={az:.3f}° (match={match})')
+    plt.colorbar(im, orientation='vertical', label='dBZ', extend='min')
+
+    ax0.set_xlabel('range [km]')
+    ax0.set_ylabel('height [km]')
 
 
 def plot_matching_pair(ds_cam, ds_kep):
@@ -367,12 +387,38 @@ def plot_overlaid(ds_cam, ds_kep):
     ax0.set_xlabel('range [km]')
     ax0.set_ylabel('height [km]')
 
+class NonmatchAnalyses(Rule):
+    rule_matrix = FindMatches.rule_matrix
+    rule_inputs = FindMatches.rule_outputs
+    rule_outputs = {'dummy': str(conf.PATHS['kasbexoutdir'] / 'nonmatch_analysis/{case}/nonmatch_analysis_dummy_{case}.txt')}
+
+    @staticmethod
+    def rule_run(inputs, outputs, case):
+        scans = pd.read_hdf(inputs['scans'], 'scans')
+        # nonmatches = scans[~scans.match]
+        outdir = Path(outputs['dummy']).parent
+
+        camscans = scans[np.isnan(scans.kep_az)]
+        kepscans = scans[np.isnan(scans.cam_az)]
+
+        for i in range(len(camscans)):
+            print(f'cam scan: {i + 1}/{len(camscans)}')
+            ds_cam = xr.open_dataset(camscans.iloc[i].cam_path)
+            plot_rhi(ds_cam, camscans.iloc[i].match)
+            plt.savefig(outdir / f'cam_rhi_{case}_{i}.png')
+        for i in range(len(kepscans)):
+            print(f'kep scan: {i + 1}/{len(kepscans)}')
+            ds_kep = xr.open_dataset(kepscans.iloc[i].kep_path)
+            plot_rhi(ds_kep, kepscans.iloc[i].match)
+            plt.savefig(outdir / f'kep_rhi_{case}_{i}.png')
+
+        Path(outputs['dummy']).write_text('Finished')
+
 
 class MatchAnalyses(Rule):
     rule_matrix = FindMatches.rule_matrix
     rule_inputs = FindMatches.rule_outputs
-    rule_outputs = {'dummy': '/gws/nopw/j04/parachute/mmuetz/data/kasbex/match_analysis/'
-                             '{case}/match_analysis_dummy_{case}.txt'}
+    rule_outputs = {'dummy': str(conf.PATHS['kasbexoutdir'] / 'match_analysis/{case}/match_analysis_dummy_{case}.txt')}
 
     @staticmethod
     def rule_run(inputs, outputs, case):
@@ -403,28 +449,29 @@ class MatchAnalyses(Rule):
 class MatchesForCaseAnalyses(Rule):
     rule_matrix = {'case': conf.KASBEX_CASES}
     rule_inputs = FindMatches.rule_outputs
-    rule_outputs = {'dummy': '/gws/nopw/j04/parachute/mmuetz/data/kasbex/matches_for_case_analysis/'
-                             '{case}/match_analysis_dummy_{case}.txt'}
+    rule_outputs = {'dummy': str(conf.PATHS['kasbexoutdir'] /
+                                 'matches_for_case_analysis/{case}/match_analysis_dummy_{case}.txt')}
 
     @staticmethod
     def rule_run(inputs, outputs, case):
         scans = pd.read_hdf(inputs['scans'], 'scans')
         matches = scans[scans.match]
-        outdir = Path(outputs['dummy']).parent
-        ds_cam = xr.open_mfdataset(matches.cam_path.values.tolist())
-        ds_kep = xr.open_mfdataset(matches.kep_path.values.tolist())
+        if len(matches):
+            outdir = Path(outputs['dummy']).parent
+            ds_cam = xr.open_mfdataset(matches.cam_path.values.tolist())
+            ds_kep = xr.open_mfdataset(matches.kep_path.values.tolist())
 
-        ds_cam = ds_cam.sel(x=slice(0, 50))
+            ds_cam = ds_cam.sel(x=slice(0, 50))
 
-        plot_joint(ds_cam, ds_kep)
-        plt.savefig(outdir / f'joint_{case}.png')
+            plot_joint(ds_cam, ds_kep)
+            plt.savefig(outdir / f'joint_{case}.png')
         Path(outputs['dummy']).write_text('Finished')
 
 
 class MatchComparison(Rule):
-    rule_inputs = {f'scan_{c}': FindMatches.rule_outputs['scans'].format(case=c)
+    rule_inputs = {f'scan_{c}': str(FindMatches.rule_outputs['scans']).format(case=c)
                    for c in conf.KASBEX_CASES}
-    rule_outputs = {'dummy': '/gws/nopw/j04/parachute/mmuetz/data/kasbex/match_comaprison/match_comparison_dummy.txt'}
+    rule_outputs = {'dummy': str(conf.PATHS['kasbexoutdir'] / 'match_comaprison/match_comparison_dummy.txt')}
 
     @staticmethod
     def rule_run(inputs, outputs):
