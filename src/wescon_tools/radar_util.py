@@ -84,12 +84,13 @@ class RadarRegridder:
         return field_grid_nan
 
 
-def xr_find_cloud_objects(ds):
+def xr_find_cloud_objects(ds, reflectivity_threshs=(10, 35, 55)):
+    reflectivity_threshs = list(reflectivity_threshs)
     xx, zz = np.meshgrid(ds.x, ds.z)
     dx = ds.x.values[1] - ds.x.values[0]
     dz = ds.z.values[1] - ds.z.values[0]
     dA = dx * dz
-    cloud_labels, lmax = ndimage.label(ds.rhi_Z > 10)
+    cloud_labels, lmax = ndimage.label(ds.rhi_Z > reflectivity_threshs[0])
     keys = [
         'cloud_area',
         'cloud_min_x',
@@ -102,7 +103,6 @@ def xr_find_cloud_objects(ds):
         'cloud_max_Z',
         'cloud_mean_Z',
     ]
-    reflectivity_threshs = [10, 35, 55]
     cloud_objs = {'cloud_label': (['time', 'cloud_id'], np.full((1, 20), np.nan))}
     for key in keys:
         cloud_objs[key] = (
