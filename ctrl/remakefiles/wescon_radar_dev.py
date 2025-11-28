@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from scipy.interpolate import griddata
+from skimage.registration import phase_cross_correlation
 
 import proj_config as conf
 from remake import Remake, Rule
@@ -106,10 +107,12 @@ class RegridCAMRaKeplerL1(Rule):
         logger.debug(da_rain)
 
         radar_paths = inputs['radar_paths']
+        # dx = 75m
         if radar == 'camra':
             x = np.linspace(0, 150, 500 * 4 + 1)
         else:
             x = np.linspace(0, 50, 500 * 4 + 1)
+        # dz = 33.33m
         z = np.linspace(0, 12, 120 * 3 + 1)
         regridder = RadarRegridder(x, z)
 
@@ -494,6 +497,7 @@ def find_brackets(df):
     df['bracket_idx'] = bracket_idx
 
 
+
 class FindCandidateDeltaZ(Rule):
     rule_matrix = {'case': conf.CASES}
     rule_inputs = {}
@@ -502,7 +506,7 @@ class FindCandidateDeltaZ(Rule):
         outdir = conf.PATHS['outdir'] / 'wescon_radar_dev' / case / 'camra' / 'deltaZ_candidate'
         return {
             f'scans': outdir / f'{case}_scans.hdf',
-            f'candidates': outdir / f'{case}_deltaZ_candidates.hdf',
+            f'brackets': outdir / f'{case}_brackets.hdf',
         }
 
     @staticmethod
@@ -546,6 +550,207 @@ class FindCandidateDeltaZ(Rule):
         print(df)
         print(brackets)
         df.to_hdf(outputs['scans'], key='scans')
-        brackets.to_hdf(outputs['candidates'], key='candidates')
+        brackets.to_hdf(outputs['brackets'], key='brackets')
 
 
+class CompareCandidates(Rule):
+    @staticmethod
+    def rule_matrix():
+        matrix = {('case', 'bracket_idx1', 'bracket_idx2'): []}
+        for case in conf.CASES:
+            inputs = FindCandidateDeltaZ.rule_outputs(case)
+            if inputs['brackets'].exists():
+                brackets = pd.read_hdf(inputs['brackets'], key='brackets')
+                for i in range(1, len(brackets)):
+                    if brackets.iloc[i]['deltaZ_candidate']:
+                        matrix[('case', 'bracket_idx1', 'bracket_idx2')].append((case, i - 1, i))
+        return matrix
+
+    @staticmethod
+    def rule_inputs(case, bracket_idx1, bracket_idx2):
+        return {}
+
+    @staticmethod
+    def rule_outputs(case, bracket_idx1, bracket_idx2):
+        outdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / case / 'camra' / 'deltaZ_candidate'
+        return {
+            f'dummy': outdir / 'comparison' / f'{case}_{bracket_idx1}_{bracket_idx2}' / f'{case}_{bracket_idx1}_{bracket_idx2}.dummy.out',
+        }
+
+    @staticmethod
+    def rule_run(inputs, outputs, case, bracket_idx1, bracket_idx2):
+        figdir = outputs['dummy'].parent
+        ds1, ds2, ds1_comp, ds2_comp, labels1, labels2, objs1, objs2 = CompareCandidates.load_composites_and_idenfiy_objs(
+            bracket_idx1, bracket_idx2, case)
+        matches = CompareCandidates.find_overlapping_cloud_matches(labels1, labels2, objs1, objs2)
+        print('matches:', matches)
+
+        CompareCandidates.plot_composites(ds1_comp, ds2_comp, figdir)
+
+        for cl1, cl2 in matches:
+            # Find the union of both coherent objs.
+            cloud_union = (labels1 == cl1) | (labels2 == cl2)
+            # Note the z-axis is axis=0 (x-axis is axis=1) AND relies on these being sorted (safe assumption).
+            x_idxmin, x_idxmax = np.where(cloud_union.any(axis=0))[0][[0, -1]]
+            z_idxmax = np.where(cloud_union.any(axis=1))[0][-1]
+
+            offset_pad = 20  # == 1.5km (20 * 75m) in x, 666.6m (20 * 33.33m) in z.
+            x_idxmin = x_idxmin - offset_pad
+            x_idxmax = x_idxmax + offset_pad
+            z_idxmax = z_idxmax + offset_pad
+            xmin = ds1_comp.x.values[x_idxmin]
+            xmax = ds1_comp.x.values[x_idxmax]
+            print(xmin, xmax)
+
+            # Slice datasets to domain of interest defined by cloud_union
+            ds1_sub = ds1_comp.isel(x=slice(x_idxmin, x_idxmax), z=slice(None, z_idxmax))
+            ds2_sub = ds2_comp.isel(x=slice(x_idxmin, x_idxmax), z=slice(None, z_idxmax))
+            print(xmax - xmin)
+            CompareCandidates.plot_radarnet(ds1, ds2, cl1, cl2, xmin, xmax, figdir)
+
+            # SLice labels similarly (numpy arrays) and use to reduce area which has usable info for calculating offset.
+            Z1 = ds1_sub.rhi_Z.values * (labels1[:z_idxmax, x_idxmin:x_idxmax] == cl1).astype(float)
+            Z1[np.isnan(Z1)] = 0
+            Z1[Z1 < 20] = 0
+            Z2 = ds2_sub.rhi_Z.values * (labels2[:z_idxmax, x_idxmin:x_idxmax] == cl2).astype(float)
+            Z2[Z2 < 20] = 0
+            Z2[np.isnan(Z2)] = 0
+
+            # Calculate maximum correlation offset.
+            # Correlate on actual Z, not dBZ.
+            Z1 = 10 ** (Z1 / 10)
+            Z2 = 10 ** (Z2 / 10)
+
+            offset_vec, _, _ = phase_cross_correlation(Z1, Z2, disambiguate=True)
+            print(offset_vec)
+            CompareCandidates.plot_composites_for_match(ds1_sub, ds2_sub, cl1, cl2, cloud_union, figdir, x_idxmax, x_idxmin,
+                                                        z_idxmax, labels1, labels2)
+            CompareCandidates.plot_reduced_Z_field(ds1_sub, Z1, Z2, cl1, cl2, figdir)
+            if np.abs(offset_vec[0]) > 4:
+                print('z-offset too large')
+                continue
+            CompareCandidates.plot_dZ(ds1_sub, ds2_sub, cl1, cl2, offset_vec, figdir)
+        outputs['dummy'].write_text('done')
+
+    @staticmethod
+    def plot_radarnet(ds1, ds2, cl1, cl2, xmin, xmax, figdir):
+        # km to m.
+        xmin *= 1e3
+        xmax *= 1e3
+        da1 = ds1.nimrod_flow_interped_rain.mean(dim='time')
+        da2 = ds2.nimrod_flow_interped_rain.mean(dim='time')
+        fig, (ax1, ax2) = plt.subplots(1, 2, sharex=True, sharey=True, layout='constrained')
+        levels = [0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64]
+        colors = ((0, 0, 0.6), 'b', 'c', 'g', 'y', (1, 0.5, 0), 'r', 'm', (0.6, 0.6, 0.6))
+        im = ax1.contourf(da1.eastings, da1.northings, da1, levels=levels, colors=colors)
+        im = ax2.contourf(da2.eastings, da2.northings, da2, levels=levels, colors=colors)
+        for ax, ds in [(ax1, ds1), (ax2, ds2)]:
+            for i in range(len(ds.time)):
+                az = ds.isel(time=i).rhi_mean_az.values.item()
+                print(i, az)
+                xs = CHIL_X + np.linspace(0, 150e3, 16) * np.sin(az * np.pi / 180)
+                ys = CHIL_Y + np.linspace(0, 150e3, 16) * np.cos(az * np.pi / 180)
+                ax.plot(xs, ys, 'k--')
+                ax.plot(xs[2::2], ys[2::2], 'kx')
+                ax.plot(xs[0], ys[0], 'ko')
+                xs = CHIL_X + np.linspace(xmin, xmax, 2) * np.sin(az * np.pi / 180)
+                ys = CHIL_Y + np.linspace(xmin, xmax, 2) * np.cos(az * np.pi / 180)
+                ax.plot(xs, ys, 'k-', lw=3)
+                ax.plot(xs, ys, 'kx', lw=3)
+
+        az_mean = np.mean([ds1.rhi_mean_az.values.mean(), ds1.rhi_mean_az.values.mean()])
+        xmid = (xmin + xmax) / 2
+        dx = xmax - xmin
+        xcentre = CHIL_X + xmid * np.sin(az_mean * np.pi / 180)
+        ycentre = CHIL_Y + xmid * np.cos(az_mean * np.pi / 180)
+        ax.set_xlim(xcentre - dx / 2, xcentre + dx / 2)
+        ax.set_ylim(ycentre - dx / 2, ycentre + dx / 2)
+
+        plt.savefig(figdir / f'radarnet_{cl1}-{cl2}.png'.replace(' ', '_'))
+
+    @staticmethod
+    def find_overlapping_cloud_matches(labels1, labels2, objs1, objs2):
+        # Find overlapping clouds (matches) between the two composites.
+        matches = []
+        for cl1 in objs1.cloud_label.dropna('cloud_id').values[0]:
+            for cl2 in objs2.cloud_label.dropna('cloud_id').values[0]:
+                print(cl1, cl2)
+                if ((labels1 == cl1) & (labels2 == cl2)).sum() >= 1:
+                    matches.append((cl1, cl2))
+        return matches
+
+    @staticmethod
+    def load_composites_and_idenfiy_objs(bracket_idx1, bracket_idx2, case):
+        inputs = FindCandidateDeltaZ.rule_outputs(case)
+
+        scans = pd.read_hdf(inputs['scans'], key='scans')
+        # brackets = pd.read_hdf(inputs['brackets'], key='brackets')
+        # b1 = brackets.iloc[brackets['bracket_idx1']]
+        # b2 = brackets.iloc[brackets['bracket_idx2']]
+
+        b1paths = scans[scans.bracket == bracket_idx1]['path'].values
+        b2paths = scans[scans.bracket == bracket_idx2]['path'].values
+        assert len(b1paths) == len(b2paths) == 4
+        ds1 = xr.open_mfdataset(b1paths)
+        ds2 = xr.open_mfdataset(b2paths)
+
+        # Find coherent objects from each composite scan
+        ds1_comp = ds1.mean(dim='time')
+        ds1_comp['time'] = ds1.time.mean()
+        labels1, objs1 = xr_find_cloud_objects(ds1_comp, (0, 10, 35, 55))
+        ds2_comp = ds2.mean(dim='time')
+        ds2_comp['time'] = ds2.time.mean()
+        labels2, objs2 = xr_find_cloud_objects(ds2_comp, (0, 10, 35, 55))
+        return ds1, ds2, ds1_comp, ds2_comp, labels1, labels2, objs1, objs2
+
+    @staticmethod
+    def plot_dZ(ds1_sub, ds2_sub, cl1, cl2, offset_vec, figdir):
+        fig, axes = plt.subplots(4, 1, sharex=True, sharey=True, layout='constrained')
+        t1 = pd.Timestamp(ds1_sub.time.values.item())
+        fig.suptitle(f'{t1}: {offset_vec}')
+        axes[0].contour(ds1_sub.x, ds1_sub.z, ds1_sub.rhi_Z.values, levels=[10, 20, 30],
+                        colors=['blue', 'blue', 'blue'])
+        # ONLY roll in x-dir
+        axes[0].contour(ds1_sub.x, ds1_sub.z, np.roll(ds2_sub.rhi_Z.values, int(offset_vec[1]), axis=1),
+                        levels=[10, 20, 30], colors=['red', 'red', 'red'])
+
+        axes[1].pcolormesh(ds1_sub.x, ds1_sub.z, ds1_sub.rhi_Z.values, vmin=-10, vmax=60)
+        # axes[2].pcolormesh(ds1_sub.x, ds1_sub.z, np.roll(np.roll(Z2, int(offset_vec[0]), axis=0), int(offset_vec[1]), axis=1), vmin=-10, vmax=60)
+        # ONLY roll in x-dir
+        axes[2].pcolormesh(ds1_sub.x, ds1_sub.z, np.roll(ds2_sub.rhi_Z.values, int(offset_vec[1]), axis=1), vmin=-10,
+                           vmax=60)
+
+        axes[3].pcolormesh(ds1_sub.x, ds1_sub.z,
+                           np.roll(ds2_sub.rhi_Z.values, int(offset_vec[1]), axis=1) - ds1_sub.rhi_Z.values, vmin=-20,
+                           vmax=20, cmap='bwr')
+        plt.savefig(figdir / f'dZ_{t1}_{cl1}-{cl2}.png'.replace(' ', '_'))
+
+    @staticmethod
+    def plot_reduced_Z_field(ds1_sub, Z1, Z2, cl1, cl2, figdir):
+        fig, axes = plt.subplots(3, 1, sharex=True, sharey=True)
+        axes[0].pcolormesh(ds1_sub.x, ds1_sub.z, Z1, vmin=-10, vmax=60)
+        axes[1].pcolormesh(ds1_sub.x, ds1_sub.z, Z2, vmin=-10, vmax=60)
+        plt.savefig(figdir / f'both_rhi_Z1_Z2_{cl1}-{cl2}.png')
+
+    @staticmethod
+    def plot_composites_for_match(ds1_sub, ds2_sub, cl1, cl2, cloud_union, figdir, x_idxmax, x_idxmin, z_idxmax, labels1,
+                                  labels2):
+        fig, axes = plt.subplots(3, 1, sharex=True, sharey=True)
+        axes[0].contour(ds1_sub.x, ds1_sub.z, (labels1 == cl1)[:z_idxmax, x_idxmin:x_idxmax], levels=[0.5], colors=['blue'])
+        axes[0].contour(ds1_sub.x, ds1_sub.z, (labels2 == cl2)[:z_idxmax, x_idxmin:x_idxmax], levels=[0.5], colors=['red'])
+        axes[0].contour(ds1_sub.x, ds1_sub.z, cloud_union[:z_idxmax, x_idxmin:x_idxmax], levels=[0.5], colors=['purple'])
+
+        axes[1].pcolormesh(ds1_sub.x, ds1_sub.z, ds1_sub.rhi_Z, vmin=-10, vmax=60)
+        axes[2].pcolormesh(ds1_sub.x, ds1_sub.z, ds2_sub.rhi_Z, vmin=-10, vmax=60)
+        axes[1].set_title(pd.Timestamp(ds1_sub.time.values.item()))
+        axes[2].set_title(pd.Timestamp(ds2_sub.time.values.item()))
+        plt.savefig(figdir / f'both_rhi_composites_match_{cl1}-{cl2}.png')
+
+    @staticmethod
+    def plot_composites(ds1_comp, ds2_comp, figdir):
+        fig, axes = plt.subplots(2, 1, sharex=True, sharey=True)
+        axes[0].pcolormesh(ds1_comp.x, ds1_comp.z, ds1_comp.rhi_Z, vmin=-10, vmax=60)
+        axes[1].pcolormesh(ds1_comp.x, ds1_comp.z, ds2_comp.rhi_Z, vmin=-10, vmax=60)
+        axes[0].set_title(pd.Timestamp(ds1_comp.time.values.item()))
+        axes[1].set_title(pd.Timestamp(ds2_comp.time.values.item()))
+        plt.savefig(figdir / 'both_rhi_composites.png')
