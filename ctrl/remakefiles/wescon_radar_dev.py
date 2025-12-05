@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from itertools import batched, product
 from pathlib import Path
 
@@ -555,6 +556,41 @@ class FindCandidateDeltaZ(Rule):
         brackets.to_hdf(outputs['brackets'], key='brackets')
 
 
+def rmse(a1, a2):
+    return np.sqrt(((a1 - a2)**2).mean())
+
+def find_sliding_min_rmse(a1, a2):
+    assert len(a1) == len(a2) == 4
+    rmses = []
+    slices = []
+    for i in range(7):
+        if i < 4:
+            s1 = slice(None, i + 1)
+            s2 = slice(-(i + 1), None)
+        else:
+            s1 = slice(i - 3, None)
+            s2 = slice(None, -(i - 3))
+        rmses.append(rmse(a1[s1], a2[s2]))
+        slices.append((s1, s2))
+
+    idx = np.argmin(rmses)
+    s1, s2 = slices[idx]
+    return s1, s2
+
+@dataclass
+class CrossCorrelationResult:
+    ccidx: np.ndarray
+    ccplot: np.ndarray
+    peaks: np.ndarray
+    peak_vals: np.ndarray
+    percentiles: dict
+    offset_thresh: int
+    half: int
+    peaks_above_ptile: np.ndarray
+    peaks_not_too_far: np.ndarray
+    valid_offsets: np.ndarray
+
+
 class CompareCandidates(Rule):
     @staticmethod
     def rule_matrix():
@@ -576,179 +612,278 @@ class CompareCandidates(Rule):
     def rule_outputs(case, bracket_idx1, bracket_idx2):
         outdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / case / 'camra' / 'deltaZ_candidate'
         return {
-            f'dummy': outdir / 'comparison' / f'{case}_{bracket_idx1}_{bracket_idx2}' / f'{case}_{bracket_idx1}_{bracket_idx2}.dummy.out',
+            f'dummy': outdir / 'comparison' / 'v5' / f'{case}_{bracket_idx1}_{bracket_idx2}' / f'{case}_{bracket_idx1}_{bracket_idx2}.dummy.out',
         }
 
     @staticmethod
     def rule_run(inputs, outputs, case, bracket_idx1, bracket_idx2):
-        print('v9')
         figdir = outputs['dummy'].parent
-        ds1, ds2, ds1_comp, ds2_comp, labels1, labels2, objs1, objs2 = CompareCandidates.load_composites_and_idenfiy_objs(
-            bracket_idx1, bracket_idx2, case)
-        matches = CompareCandidates.find_overlapping_cloud_matches(labels1, labels2, objs1, objs2)
-        print('matches:', matches)
+        print('code: v9')
+        print(f'output: {figdir.parent.name}')
+        ds1, ds2 = CompareCandidates.load_data(bracket_idx1, bracket_idx2, case)
+        beam_idx1 = [0, 1, 2, 3]
+        beam_idx2 = [0, 1, 2, 3]
+        # beam_idx1 = [0, 1, 2]
+        # beam_idx2 = [1, 2, 3]
+        ds1_comp, ds2_comp = CompareCandidates.create_composites(ds1, ds2, beam_idx1, beam_idx2)
+        t1 = pd.Timestamp(ds1_comp.time.values.item())
+        t2 = pd.Timestamp(ds2_comp.time.values.item())
 
-        for cl1, cl2 in matches:
-            dpi = 100
-            w_px, h_px = 1920, 1080
+        dt = t2 - t1
+        dts = dt.total_seconds()
+        new_beam_idxs = {}
+        for x in np.arange(20, 150, 1):
+            x_idx = np.argmin(np.abs(ds1.x.values - x))
+            x_idxmin = x_idx - 20
+            x_idxmax = x_idx + 20
+            (est_offset, mean_wind_parallel, mean_wind_perpendicular, transect_wind_parallel,
+             transect_wind_perpendicular) = CompareCandidates.calc_parallel_perpendicular_winds(ds1, ds1_comp, dts,
+                                                                                                x_idxmin, x_idxmax)
 
-            # Find the union of both coherent objs.
-            cloud_union = (labels1 == cl1) | (labels2 == cl2)
-            # Note the z-axis is axis=0 (x-axis is axis=1) AND relies on these being sorted (safe assumption).
-            x_idxmin, x_idxmax = np.where(cloud_union.any(axis=0))[0][[0, -1]]
-            z_idxmax = np.where(cloud_union.any(axis=1))[0][-1]
+            beam_centres1 = x * (ds1.rhi_mean_az.values * np.pi / 180 - ds1.rhi_mean_az.values[0] * np.pi / 180)
+            beam_centres1_proj = beam_centres1 - mean_wind_perpendicular * dts / 1e3
+            beam_centres2 = x * (ds2.rhi_mean_az.values * np.pi / 180 - ds1.rhi_mean_az.values[0] * np.pi / 180)
+            s1, s2 = find_sliding_min_rmse(beam_centres1_proj, beam_centres2)
+            beam_idx1 = np.arange(4)[s1]
+            beam_idx2 = np.arange(4)[s2]
+            new_beam_idxs[x] = (tuple(beam_idx1), tuple(beam_idx2))
 
-            offset_pad = 20  # == 1.5km (20 * 75m) in x, 666.6m (20 * 33.33m) in z.
-            x_idxmin = x_idxmin - offset_pad
-            x_idxmax = x_idxmax + offset_pad
-            z_idxmax = z_idxmax + offset_pad
-            xmin = ds1_comp.x.values[x_idxmin]
-            xmax = ds1_comp.x.values[x_idxmax]
-            zmax = ds1_comp.z.values[z_idxmax]
-            print(xmin, xmax)
+        print(set(new_beam_idxs.values()))
 
-            t1 = pd.Timestamp(ds1_comp.time.values.item())
-            t2 = pd.Timestamp(ds2_comp.time.values.item())
+        for beam_idx1, beam_idx2 in set(new_beam_idxs.values()):
+            print(beam_idx1, beam_idx2)
+            ds1_comp, ds2_comp = CompareCandidates.create_composites(ds1, ds2, list(beam_idx1), list(beam_idx2))
+            labels1, labels2, objs1, objs2 = CompareCandidates.find_coherent_objects(ds1_comp, ds2_comp)
+            print(objs1.cloud_label.dropna('cloud_id').values)
+            print(objs2.cloud_label.dropna('cloud_id').values)
+            matches = CompareCandidates.find_overlapping_cloud_matches(labels1, labels2, objs1, objs2)
+            print('matches:', matches)
 
-            # Slice datasets to domain of interest defined by cloud_union
-            ds1_sub = ds1_comp.isel(x=slice(x_idxmin, x_idxmax), z=slice(None, z_idxmax))
-            ds2_sub = ds2_comp.isel(x=slice(x_idxmin, x_idxmax), z=slice(None, z_idxmax))
-            print(xmax - xmin)
-            # SLice labels similarly (numpy arrays) and use to reduce area which has usable info for calculating offset.
-            # Z1 = ds1_sub.rhi_Z.values * (labels1[:z_idxmax, x_idxmin:x_idxmax] == cl1).astype(float)
-            Z1 = ds1_sub.rhi_Z.values
-            Z1[np.isnan(Z1)] = 0
-            # Z1[Z1 < 20] = 0
-            # Z2 = ds2_sub.rhi_Z.values * (labels2[:z_idxmax, x_idxmin:x_idxmax] == cl2).astype(float)
-            Z2 = ds2_sub.rhi_Z.values
-            # Z2[Z2 < 20] = 0
-            Z2[np.isnan(Z2)] = 0
+            for cl1, cl2 in matches:
+                # Find the union of both coherent objs.
+                cloud_union = (labels1 == cl1) | (labels2 == cl2)
+                # Note the z-axis is axis=0 (x-axis is axis=1) AND relies on these being sorted (safe assumption).
+                x_idxmin, x_idxmax = np.where(cloud_union.any(axis=0))[0][[0, -1]]
+                z_idxmax = np.where(cloud_union.any(axis=1))[0][-1]
 
-            # Calculate maximum correlation offset.
-            # Correlate on actual Z, not dBZ.
-            Z1 = 10 ** (Z1 / 10)
-            Z2 = 10 ** (Z2 / 10)
+                offset_pad = 20  # == 1.5km (20 * 75m) in x, 666.6m (20 * 33.33m) in z.
+                x_idxmin = x_idxmin - offset_pad
+                x_idxmax = x_idxmax + offset_pad
+                z_idxmax = z_idxmax + offset_pad
+                xmin = ds1_comp.x.values[x_idxmin]
+                xmax = ds1_comp.x.values[x_idxmax]
+                zmax = ds1_comp.z.values[z_idxmax]
+                print(xmin, xmax)
 
-            # 2D offset - not what we want (we will assume no offset in z-dir)
-            # offset_vec, _, _ = phase_cross_correlation(Z1, Z2, disambiguate=True)
-            Z1_1D = Z1.mean(axis=0)
-            Z2_1D = Z2.mean(axis=0)
-            F1 = np.fft.fft(Z1_1D)
-            F2 = np.fft.fft(Z2_1D)
-            R = F1 * np.conj(F2)
-            R /= np.abs(R) + 1e-12
-            cc = np.fft.ifft(R).real
-            half = len(cc) // 2
-            ccidx = np.roll(np.arange(len(cc)), half)
-            ccidx[ccidx > half] -= len(cc)
-            ccplot = np.roll(cc, half)
-            peaks, _ = find_peaks(ccplot)
-            p99, p98, p95 = np.percentile(ccplot, [99, 98, 95])
-            peak_vals = ccplot[peaks]
+                # Slice datasets to domain of interest defined by cloud_union
+                ds1_sub = ds1_comp.isel(x=slice(x_idxmin, x_idxmax), z=slice(None, z_idxmax))
+                ds2_sub = ds2_comp.isel(x=slice(x_idxmin, x_idxmax), z=slice(None, z_idxmax))
+                print(xmax - xmin)
+                # SLice labels similarly (numpy arrays) and use to reduce area which has usable info for calculating offset.
+                # Z1 = ds1_sub.rhi_Z.values * (labels1[:z_idxmax, x_idxmin:x_idxmax] == cl1).astype(float)
+                Z1 = ds1_sub.rhi_Z.values
+                Z1[np.isnan(Z1)] = 0
+                # Z1[Z1 < 20] = 0
+                # Z2 = ds2_sub.rhi_Z.values * (labels2[:z_idxmax, x_idxmin:x_idxmax] == cl2).astype(float)
+                Z2 = ds2_sub.rhi_Z.values
+                # Z2[Z2 < 20] = 0
+                Z2[np.isnan(Z2)] = 0
 
-            peaks_above_ptile = peaks[peak_vals > p95]
-            offset_thresh = 20
-            peaks_not_to_far = peaks[(ccidx[peaks] > -offset_thresh) & (ccidx[peaks] < offset_thresh)]
-            offsets = ccidx[np.intersect1d(peaks_above_ptile, peaks_not_to_far)]
-            # offset = np.argmax(cc)
-            for offset in offsets:
-                print(f'offset {offset}')
-                offset_vec = (0, offset)
+                # Calculate maximum correlation offset.
+                # Correlate on actual Z, not dBZ.
+                Z1 = 10 ** (Z1 / 10)
+                Z2 = 10 ** (Z2 / 10)
 
-                fig = plt.figure(layout='constrained', figsize=(w_px / dpi, h_px / dpi), dpi=dpi)
-                gs = gridspec.GridSpec(ncols=4, nrows=4, figure=fig)
-                ax1 = fig.add_subplot(gs[0, 0])
-                ax2 = fig.add_subplot(gs[0, 3])
-                ax3 = fig.add_subplot(gs[1, 3])
-                ax4 = fig.add_subplot(gs[2, 3], sharex=ax3, sharey=ax3)
-                ax5 = fig.add_subplot(gs[1, 0])
-                ax6 = fig.add_subplot(gs[2, 0], sharex=ax5, sharey=ax5)
-                ax7 = fig.add_subplot(gs[0, 1])
-                ax8 = fig.add_subplot(gs[1, 1], sharex=ax7, sharey=ax7)
-                ax9 = fig.add_subplot(gs[2, 1], sharex=ax7, sharey=ax7)
-                ax10 = fig.add_subplot(gs[0, 2], sharex=ax7, sharey=ax7)
-                ax11 = fig.add_subplot(gs[1, 2], sharex=ax7, sharey=ax7)
-                ax12 = fig.add_subplot(gs[2, 2], sharex=ax7, sharey=ax7)
-                ax13 = fig.add_subplot(gs[3, 2], sharex=ax7, sharey=ax7)
-                ax14 = fig.add_subplot(gs[3, 0])
-                ax15 = fig.add_subplot(gs[3, 1])
+                cc_result = CompareCandidates.calc_cross_correlation(Z1, Z2)
+                # new_beam_idxs = []
+                for offset in cc_result.valid_offsets:
+                    print(f'offset {offset}')
+                    offset_vec = (0, offset)
 
-                for ax in [ax2, ax3, ax4]:
-                    ax.set_aspect(1, adjustable='box')
+                    fig, axes = CompareCandidates.create_fig_axes()
 
-                ax1.axis('off')
-                dt = t2 - t1
-                dts = dt.total_seconds()
-                az1 = ds1.rhi_mean_az.mean().values.item()
-                az2 = ds2.rhi_mean_az.mean().values.item()
-                az1s = ds1.rhi_mean_az.values - az1
-                az2s = ds2.rhi_mean_az.values - az2
-                az1s_str = '(' + ', '.join([f'{v:.2f}' for v in az1s]) + ')'
-                az2s_str = '(' + ', '.join([f'{v:.2f}' for v in az2s]) + ')'
-                msg = (
-                    f's1: {t1:%Y-%m-%d %H:%M:%S}, {az1:.2f}deg {az1s_str}\n'
-                    f's2: {t2:%Y-%m-%d %H:%M:%S}, {az2:.2f}deg {az2s_str}\n'
-                    f'dt: {dts:.2f}s'
-                )
-                ax1.text(0, 1, msg, ha='left', va='top')
+                    dts = CompareCandidates.plot_info(ds1, ds2, t1, t2, axes)
+                    CompareCandidates.plot_radarnet(ds1, ds2, xmin, xmax, axes[1, 3], axes[2, 3], beam_idx1, beam_idx2)
+                    CompareCandidates.plot_composites(ds1_comp, ds2_comp, xmin, xmax, zmax, axes[1:3, 0])
+                    CompareCandidates.plot_radarnet_combined(ds1, ds2, axes[0, 3], xmin, xmax)
+                    CompareCandidates.plot_composites_for_match(ds1_sub, ds2_sub, Z1, Z2, cl1, cl2, cloud_union, x_idxmax, x_idxmin,
+                                                                z_idxmax, labels1, labels2, axes[:3, 1])
+                    CompareCandidates.plot_dZ(ds1_sub, ds2_sub, Z1, Z2, offset_vec, axes[:, 2])
 
-                CompareCandidates.plot_radarnet(ds1, ds2, cl1, cl2, xmin, xmax, ax3, ax4)
-                CompareCandidates.plot_composites(ds1_comp, ds2_comp, xmin, xmax, zmax, [ax5, ax6])
-                CompareCandidates.plot_radarnet_combined(ds1, ds2, ax2, xmin, xmax)
+                    (est_offset, mean_wind_parallel, mean_wind_perpendicular, transect_wind_parallel,
+                     transect_wind_perpendicular) = CompareCandidates.calc_parallel_perpendicular_winds(ds1, ds1_comp, dts,
+                                                                                                        x_idxmin, x_idxmax)
 
-                CompareCandidates.plot_composites_for_match(ds1_sub, ds2_sub, Z1, Z2, cl1, cl2, cloud_union, x_idxmax, x_idxmin,
-                                                            z_idxmax, labels1, labels2, [ax7, ax8, ax9])
-                CompareCandidates.plot_dZ(ds1_sub, ds2_sub, Z1, Z2, offset_vec, [ax10, ax11, ax12, ax13])
+                    # print(ds1.rhi_mean_az.values)
+                    # print(ds2.rhi_mean_az.values)
+                    # beam_centres1 = xmid * (ds1.rhi_mean_az.values * np.pi / 180 - ds1.rhi_mean_az.values[0] * np.pi / 180)
+                    # beam_centres1_proj = beam_centres1 - mean_wind_perpendicular * dts / 1e3
+                    # beam_centres2 = xmid * (ds2.rhi_mean_az.values * np.pi / 180 - ds1.rhi_mean_az.values[0] * np.pi / 180)
+                    # print(xmid)
+                    # print(mean_wind_perpendicular)
+                    # print(beam_centres1)
+                    # print(beam_centres1_proj)
+                    # print(beam_centres2)
+                    # # breakpoint()
+                    # aligned = True
+                    # s1, s2 = find_sliding_min_rmse(beam_centres1_proj, beam_centres2)
+                    # if len(beam_centres1_proj[s1]) != 4:
+                    #     print('Beams out of alignment! Rerun.')
+                    #     beam_idx1 = np.arange(4)[s1]
+                    #     beam_idx2 = np.arange(4)[s2]
+                    #     new_beam_idxs.append((beam_idx1, beam_idx2))
+                    #     aligned = False
+                    xmid = (xmax + xmin) / 2
+                    aligned = new_beam_idxs[int(round(xmid))] == (beam_idx1, beam_idx2)
 
-                az_mean = ds1.rhi_mean_az.values.mean()
-                transect_dist = ds1_comp.x.values
-                transect_x = xr.DataArray(transect_dist * np.sin(az_mean * np.pi / 180) + CHIL_X, dims='transect')
-                transect_y = xr.DataArray(transect_dist * np.cos(az_mean * np.pi / 180) + CHIL_Y, dims='transect')
+                    if offset == cc_result.valid_offsets[np.argmin(np.abs(cc_result.valid_offsets - est_offset))]:
+                        optimal = True
+                    else:
+                        optimal = False
+                    print(f'optimal: {optimal}')
+                    CompareCandidates.plot_cross_corr(cc_result, offset, optimal, axes[3, 0])
 
-                # transect_rain = ds.nimrod_flow_interped_rain.interp(eastings=transect_x, northings=transect_y)
-                transect_u = ds1_comp.nimrod_flow_vec_x.interp(eastings=transect_x, northings=transect_y) * 1000 / 300
-                transect_v = ds1_comp.nimrod_flow_vec_y.interp(eastings=transect_x, northings=transect_y) * 1000 / 300
-                transect_wind_parallel = transect_u * np.sin(az_mean * np.pi / 180) + transect_v * np.cos(az_mean * np.pi / 180)
-                transect_wind_perpendicular = - transect_u * np.cos(az_mean * np.pi / 180) + transect_v * np.sin(az_mean * np.pi / 180)
-                mean_wind_parallel = transect_wind_parallel.isel(transect=slice(x_idxmin, x_idxmax)).mean().values.item()
-                mean_wind_perpendicular = transect_wind_perpendicular.isel(transect=slice(x_idxmin, x_idxmax)).mean().values.item()
-                est_offset = -mean_wind_parallel * dts / 75
+                    ax = axes[3, 1]
+                    ax.set_title(f'par={mean_wind_parallel:.2f}, perp={mean_wind_perpendicular:.2f} [m/s], est_offset={est_offset:.2f}')
+                    ax.plot(ds1_comp.x.values, transect_wind_parallel)
+                    ax.plot(ds1_comp.x.values, transect_wind_perpendicular)
+                    ax.set_xlim(xmin, xmax)
 
-                if offset == offsets[np.argmin(np.abs(offsets - est_offset))]:
-                    optimal_offset = True
-                else:
-                    optimal_offset = False
-                print(f'optimal: {optimal_offset}')
+                    fname = (f'dashboard.{bracket_idx1}_{bracket_idx2}.'
+                             f'{t1:%Y-%m-%d_%H%M%S}_{t2:%Y-%m-%d_%H%M%S}.'
+                             f'{cl1}_{cl2}.'
+                             f'{offset=}.{optimal=}.{aligned=}.'
+                             f'a1={beam_idx1}.a2={beam_idx2}.png'.replace(' ', ''))
+                    print(fname)
+                    plt.savefig(figdir / fname)
 
-                ax14.set_title(f'offset={offset} (={offset * 75}m)')
-                ax14.plot(ccidx, ccplot)
-                ax14.axhline(y=p95, color='k', ls='-.')
-                ax14.axhline(y=p98, color='k', ls='--')
-                ax14.axhline(y=p99, color='k', ls='-')
-                ax14.axhline(y=p99, color='k', ls='-')
-                ax14.axvline(x=-offset_thresh, color='k', ls='-.')
-                ax14.axvline(x=offset_thresh, color='k', ls='-.')
-                for ptile, c in [(p95, 'k')]:
-                    peaks_above_ptile = peaks[peak_vals > ptile]
-                    peaks_not_to_far = peaks[(ccidx[peaks] > -offset_thresh) & (ccidx[peaks] < offset_thresh)]
-                    keep_mask = np.intersect1d(peaks_above_ptile, peaks_not_to_far)
-                    ax14.scatter(ccidx[keep_mask], ccplot[keep_mask], color=c, marker='o')
-                if optimal_offset:
-                    ax14.scatter(ccidx[offset + half], ccplot[offset + half], color='g', marker='o')
-                else:
-                    ax14.scatter(ccidx[offset + half], ccplot[offset + half], color='r', marker='o')
-
-                ax15.set_title(f'par={mean_wind_parallel:.2f}, perp={mean_wind_perpendicular:.2f} [m/s], est_offset={est_offset:.2f}')
-                ax15.plot(ds1_comp.x.values, transect_wind_parallel)
-                ax15.plot(ds1_comp.x.values, transect_wind_perpendicular)
-                ax15.set_xlim(xmin, xmax)
-
-                optimal = '_optimal' if optimal_offset else ''
-                plt.savefig(figdir / f'dashboard_{t1}_{t2}_{cl1}-{cl2}_offset{offset}{optimal}.png'.replace(' ', '_'))
         outputs['dummy'].write_text('done')
 
     @staticmethod
-    def plot_radarnet(ds1, ds2, cl1, cl2, xmin, xmax, ax1, ax2):
+    def plot_cross_corr(cc_result, offset, optimal_offset, ax):
+        ax.set_title(f'offset={offset} (={offset * 75}m)')
+        ax.plot(cc_result.ccidx, cc_result.ccplot)
+        ax.axhline(y=cc_result.percentiles['p95'], color='k', ls='-.')
+        ax.axhline(y=cc_result.percentiles['p98'], color='k', ls='--')
+        ax.axhline(y=cc_result.percentiles['p99'], color='k', ls='-')
+        ax.axvline(x=-cc_result.offset_thresh, color='k', ls='-.')
+        ax.axvline(x=cc_result.offset_thresh, color='k', ls='-.')
+        for ptile, c in [(cc_result.percentiles['p95'], 'k')]:
+            peaks_above_ptile = cc_result.peaks[cc_result.peak_vals > ptile]
+            peaks_not_too_far = cc_result.peaks[
+                (cc_result.ccidx[cc_result.peaks] > -cc_result.offset_thresh) & (
+                        cc_result.ccidx[cc_result.peaks] < cc_result.offset_thresh)]
+            keep_mask = np.intersect1d(peaks_above_ptile, peaks_not_too_far)
+            ax.scatter(cc_result.ccidx[keep_mask], cc_result.ccplot[keep_mask], color=c, marker='o')
+        if optimal_offset:
+            ax.scatter(cc_result.ccidx[offset + cc_result.half], cc_result.ccplot[offset + cc_result.half],
+                       color='g', marker='o')
+        else:
+            ax.scatter(cc_result.ccidx[offset + cc_result.half], cc_result.ccplot[offset + cc_result.half],
+                       color='r', marker='o')
+
+    @staticmethod
+    def calc_cross_correlation(Z1, Z2):
+        # 2D offset - not what we want (we will assume no offset in z-dir)
+        # offset_vec, _, _ = phase_cross_correlation(Z1, Z2, disambiguate=True)
+        Z1_1D = Z1.mean(axis=0)
+        Z2_1D = Z2.mean(axis=0)
+        F1 = np.fft.fft(Z1_1D)
+        F2 = np.fft.fft(Z2_1D)
+        R = F1 * np.conj(F2)
+        R /= np.abs(R) + 1e-12
+        cc = np.fft.ifft(R).real
+        half = len(cc) // 2
+        ccidx = np.roll(np.arange(len(cc)), half)
+        ccidx[ccidx > half] -= len(cc)
+        ccplot = np.roll(cc, half)
+        peaks, _ = find_peaks(ccplot)
+        p99, p98, p95 = np.percentile(ccplot, [99, 98, 95])
+        peak_vals = ccplot[peaks]
+
+        offset_thresh = 20
+        peaks_above_ptile = peaks[peak_vals > p95]
+        peaks_not_too_far = peaks[(ccidx[peaks] > -offset_thresh) & (ccidx[peaks] < offset_thresh)]
+
+        cc_result = CrossCorrelationResult(
+            ccidx=ccidx,
+            ccplot=ccplot,
+            peaks=peaks,
+            peak_vals=peak_vals,
+            percentiles={'p99': p99, 'p98': p98, 'p95': p95},
+            offset_thresh=offset_thresh,
+            half=half,
+            peaks_above_ptile=peaks_above_ptile,
+            peaks_not_too_far=peaks_not_too_far,
+            valid_offsets=ccidx[np.intersect1d(peaks_above_ptile, peaks_not_too_far)]
+        )
+        return cc_result
+
+    @staticmethod
+    def calc_parallel_perpendicular_winds(ds1, ds1_comp, dts, x_idxmin, x_idxmax):
+        az_mean = ds1.rhi_mean_az.values.mean()
+        transect_dist = ds1_comp.x.values
+        transect_x = xr.DataArray(transect_dist * np.sin(az_mean * np.pi / 180) + CHIL_X, dims='transect')
+        transect_y = xr.DataArray(transect_dist * np.cos(az_mean * np.pi / 180) + CHIL_Y, dims='transect')
+
+        transect_u = ds1_comp.nimrod_flow_vec_x.interp(eastings=transect_x, northings=transect_y) * 1000 / 300
+        transect_v = ds1_comp.nimrod_flow_vec_y.interp(eastings=transect_x, northings=transect_y) * 1000 / 300
+        transect_wind_parallel = transect_u * np.sin(az_mean * np.pi / 180) + transect_v * np.cos(az_mean * np.pi / 180)
+        transect_wind_perpendicular = - transect_u * np.cos(az_mean * np.pi / 180) + transect_v * np.sin(
+            az_mean * np.pi / 180)
+        mean_wind_parallel = transect_wind_parallel.isel(transect=slice(x_idxmin, x_idxmax)).mean().values.item()
+        mean_wind_perpendicular = transect_wind_perpendicular.isel(
+            transect=slice(x_idxmin, x_idxmax)).mean().values.item()
+        est_offset = -mean_wind_parallel * dts / 75
+        return est_offset, mean_wind_parallel, mean_wind_perpendicular, transect_wind_parallel, transect_wind_perpendicular
+
+    @staticmethod
+    def plot_info(ds1, ds2, t1, t2, axes):
+        dt = t2 - t1
+        dts = dt.total_seconds()
+        az1 = ds1.rhi_mean_az.mean().values.item()
+        az2 = ds2.rhi_mean_az.mean().values.item()
+        az1s = ds1.rhi_mean_az.values - az1
+        az2s = ds2.rhi_mean_az.values - az2
+        az1s_str = '(' + ', '.join([f'{v:.2f}' for v in az1s]) + ')'
+        az2s_str = '(' + ', '.join([f'{v:.2f}' for v in az2s]) + ')'
+        msg = (
+            f's1: {t1:%Y-%m-%d %H:%M:%S}, {az1:.2f}deg {az1s_str}\n'
+            f's2: {t2:%Y-%m-%d %H:%M:%S}, {az2:.2f}deg {az2s_str}\n'
+            f'dt: {dts:.2f}s'
+        )
+        axes[0, 0].text(0, 1, msg, ha='left', va='top')
+        return dts
+
+    @staticmethod
+    def create_fig_axes(dpi=100, w_px=1920, h_px=1080):
+        fig = plt.figure(layout='constrained', figsize=(w_px / dpi, h_px / dpi), dpi=dpi)
+        gs = gridspec.GridSpec(ncols=4, nrows=4, figure=fig)
+
+        axes = np.zeros((4, 4), dtype=object)
+        shares = {
+            (1, 1): (0, 1),
+            (2, 1): (0, 1),
+            (0, 2): (0, 1),
+            (1, 2): (0, 1),
+            (2, 2): (0, 1),
+            (3, 2): (0, 1),
+            (2, 3): (1, 3),
+            (2, 0): (1, 0),
+        }
+        offs = {(0, 0), (3, 3)}
+        for i, j in product(range(4), range(4)):
+            kwargs = {} if (i, j) not in shares else {'sharex': axes[shares[i, j]], 'sharey': axes[shares[i, j]]}
+            axes[i, j] = fig.add_subplot(gs[i, j], **kwargs)
+            if (i, j) in offs:
+                axes[i, j].axis('off')
+
+        for ax in axes[:3, 3]:
+            ax.set_aspect(1, adjustable='box')
+        return fig, axes
+
+    @staticmethod
+    def plot_radarnet(ds1, ds2, xmin, xmax, ax1, ax2, beam_idx1, beam_idx2):
         # km to m.
         # xmin *= 1e3
         # xmax *= 1e3
@@ -759,19 +894,22 @@ class CompareCandidates(Rule):
         colors = ((0, 0, 0.6), 'b', 'c', 'g', 'y', (1, 0.5, 0), 'r', 'm', (0.6, 0.6, 0.6))
         im = ax1.contourf((da1.eastings - CHIL_X) / 1e3, (da1.northings - CHIL_Y) / 1e3, da1, levels=levels, colors=colors)
         im = ax2.contourf((da2.eastings - CHIL_X) / 1e3, (da2.northings - CHIL_Y) / 1e3, da2, levels=levels, colors=colors)
-        for ax, ds in [(ax1, ds1), (ax2, ds2)]:
+        for ax, ds, beam_idx in [(ax1, ds1, beam_idx1), (ax2, ds2, beam_idx2)]:
             for i in range(len(ds.time)):
+                if i in beam_idx:
+                    c = 'k'
+                else:
+                    c = 'r'
                 az = ds.isel(time=i).rhi_mean_az.values.item()
                 xs = np.linspace(0, 150, 16) * np.sin(az * np.pi / 180)
                 ys = np.linspace(0, 150, 16) * np.cos(az * np.pi / 180)
-                ax.plot(xs, ys, 'k--')
-                ax.plot(xs[2::2], ys[2::2], 'kx')
-                ax.plot(xs[0], ys[0], 'ko')
+                ax.plot(xs, ys, color=c, ls='--')
+                ax.plot(xs[2::2], ys[2::2], color=c, marker='x', ls='')
+                ax.plot(xs[0], ys[0], color=c, marker='o', ls='')
                 xs = np.linspace(xmin, xmax, 2) * np.sin(az * np.pi / 180)
                 ys = np.linspace(xmin, xmax, 2) * np.cos(az * np.pi / 180)
-                ax.plot(xs, ys, 'k-', lw=3)
-                ax.plot(xs, ys, 'kx', lw=3)
-
+                ax.plot(xs, ys, color=c, ls='-', lw=3)
+                ax.plot(xs, ys, color=c, marker='x', ls='', lw=3)
         az_mean = np.mean([ds1.rhi_mean_az.values.mean(), ds1.rhi_mean_az.values.mean()])
         xmid = (xmin + xmax) / 2
         dx = xmax - xmin
@@ -785,17 +923,7 @@ class CompareCandidates(Rule):
         # plt.savefig(figdir / f'radarnet_{cl1}-{cl2}.png'.replace(' ', '_'))
 
     @staticmethod
-    def find_overlapping_cloud_matches(labels1, labels2, objs1, objs2):
-        # Find overlapping clouds (matches) between the two composites.
-        matches = []
-        for cl1 in objs1.cloud_label.dropna('cloud_id').values[0]:
-            for cl2 in objs2.cloud_label.dropna('cloud_id').values[0]:
-                if ((labels1 == cl1) & (labels2 == cl2)).sum() >= 1:
-                    matches.append((cl1, cl2))
-        return matches
-
-    @staticmethod
-    def load_composites_and_idenfiy_objs(bracket_idx1, bracket_idx2, case):
+    def load_data(bracket_idx1, bracket_idx2, case):
         inputs = FindCandidateDeltaZ.rule_outputs(case)
 
         scans = pd.read_hdf(inputs['scans'], key='scans')
@@ -808,15 +936,32 @@ class CompareCandidates(Rule):
         assert len(b1paths) == len(b2paths) == 4
         ds1 = xr.open_mfdataset(b1paths)
         ds2 = xr.open_mfdataset(b2paths)
+        return ds1, ds2
 
+    @staticmethod
+    def create_composites(ds1, ds2, beam_idx1, beam_idx2):
+        ds1_comp = ds1.isel(time=beam_idx1).mean(dim='time')
+        ds1_comp['time'] = ds1.isel(time=beam_idx1).time.mean()
+        ds2_comp = ds2.isel(time=beam_idx2).mean(dim='time')
+        ds2_comp['time'] = ds2.isel(time=beam_idx2).time.mean()
+        return ds1_comp, ds2_comp
+
+    @staticmethod
+    def find_coherent_objects(ds1_comp, ds2_comp):
         # Find coherent objects from each composite scan
-        ds1_comp = ds1.mean(dim='time')
-        ds1_comp['time'] = ds1.time.mean()
         labels1, objs1 = xr_find_cloud_objects(ds1_comp, (10, 35, 55))
-        ds2_comp = ds2.mean(dim='time')
-        ds2_comp['time'] = ds2.time.mean()
         labels2, objs2 = xr_find_cloud_objects(ds2_comp, (10, 35, 55))
-        return ds1, ds2, ds1_comp, ds2_comp, labels1, labels2, objs1, objs2
+        return labels1, labels2, objs1, objs2
+
+    @staticmethod
+    def find_overlapping_cloud_matches(labels1, labels2, objs1, objs2):
+        # Find overlapping clouds (matches) between the two composites.
+        matches = []
+        for cl1 in objs1.cloud_label.dropna('cloud_id').values[0]:
+            for cl2 in objs2.cloud_label.dropna('cloud_id').values[0]:
+                if ((labels1 == cl1) & (labels2 == cl2)).sum() >= 1:
+                    matches.append((cl1, cl2))
+        return matches
 
     @staticmethod
     def plot_dZ(ds1_sub, ds2_sub, Z1, Z2, offset_vec, axes):
@@ -840,14 +985,6 @@ class CompareCandidates(Rule):
         axes[3].pcolormesh(ds1_sub.x, ds1_sub.z,
                            np.roll(ds2_sub.rhi_Z.values, int(offset_vec[1]), axis=1) - ds1_sub.rhi_Z.values, vmin=-20,
                            vmax=20, cmap='bwr')
-        # plt.savefig(figdir / f'dZ_{t1}_{cl1}-{cl2}.png'.replace(' ', '_'))
-
-    # @staticmethod
-    # def plot_reduced_Z_field(ds1_sub, Z1, Z2, cl1, cl2, figdir):
-    #     fig, axes = plt.subplots(3, 1, sharex=True, sharey=True)
-    #     axes[0].pcolormesh(ds1_sub.x, ds1_sub.z, Z1, vmin=-10, vmax=60)
-    #     axes[1].pcolormesh(ds1_sub.x, ds1_sub.z, Z2, vmin=-10, vmax=60)
-    #     plt.savefig(figdir / f'both_rhi_Z1_Z2_{cl1}-{cl2}.png')
 
     @staticmethod
     def plot_composites_for_match(ds1_sub, ds2_sub, Z1, Z2, cl1, cl2, cloud_union, x_idxmax, x_idxmin, z_idxmax, labels1,
