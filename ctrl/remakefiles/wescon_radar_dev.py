@@ -618,7 +618,7 @@ class CompareCandidates(Rule):
     @staticmethod
     def rule_run(inputs, outputs, case, bracket_idx1, bracket_idx2):
         figdir = outputs['dummy'].parent
-        print('code: v9')
+        print('code: v10')
         print(f'output: {figdir.parent.name}')
         ds1, ds2 = CompareCandidates.load_data(bracket_idx1, bracket_idx2, case)
         beam_idx1 = [0, 1, 2, 3]
@@ -702,10 +702,14 @@ class CompareCandidates(Rule):
 
                     fig, axes = CompareCandidates.create_fig_axes()
 
-                    dts = CompareCandidates.plot_info(ds1, ds2, t1, t2, axes)
-                    CompareCandidates.plot_radarnet(ds1, ds2, xmin, xmax, axes[1, 3], axes[2, 3], beam_idx1, beam_idx2)
-                    CompareCandidates.plot_composites(ds1_comp, ds2_comp, xmin, xmax, zmax, axes[1:3, 0])
+                    u_mean = ds1_comp.nimrod_flow_vec_x.mean().values.item()
+                    v_mean = ds1_comp.nimrod_flow_vec_y.mean().values.item()
+
+                    dts = CompareCandidates.plot_info(ds1, ds2, t1, t2, u_mean, v_mean, axes)
                     CompareCandidates.plot_radarnet_combined(ds1, ds2, axes[0, 3], xmin, xmax)
+                    CompareCandidates.plot_radarnet(ds1, ds2, xmin, xmax, axes[1, 3], axes[2, 3], beam_idx1, beam_idx2)
+
+                    CompareCandidates.plot_composites(ds1_comp, ds2_comp, xmin, xmax, zmax, axes[1:3, 0])
                     CompareCandidates.plot_composites_for_match(ds1_sub, ds2_sub, Z1, Z2, cl1, cl2, cloud_union, x_idxmax, x_idxmin,
                                                                 z_idxmax, labels1, labels2, axes[:3, 1])
                     CompareCandidates.plot_dZ(ds1_sub, ds2_sub, Z1, Z2, offset_vec, axes[:, 2])
@@ -744,7 +748,7 @@ class CompareCandidates(Rule):
                     CompareCandidates.plot_cross_corr(cc_result, offset, optimal, axes[3, 0])
 
                     ax = axes[3, 1]
-                    ax.set_title(f'par={mean_wind_parallel:.2f}, perp={mean_wind_perpendicular:.2f} [m/s], est_offset={est_offset:.2f}')
+                    ax.set_title(f'par={mean_wind_parallel:.2f}, perp={mean_wind_perpendicular:.2f} [m/s], est x-offset={est_offset:.2f}')
                     ax.plot(ds1_comp.x.values, transect_wind_parallel)
                     ax.plot(ds1_comp.x.values, transect_wind_perpendicular)
                     ax.set_xlim(xmin, xmax)
@@ -761,7 +765,7 @@ class CompareCandidates(Rule):
 
     @staticmethod
     def plot_cross_corr(cc_result, offset, optimal_offset, ax):
-        ax.set_title(f'offset={offset} (={offset * 75}m)')
+        ax.set_title(f'cross corr: x-offset={offset} (={offset * 75}m)')
         ax.plot(cc_result.ccidx, cc_result.ccplot)
         ax.axhline(y=cc_result.percentiles['p95'], color='k', ls='-.')
         ax.axhline(y=cc_result.percentiles['p98'], color='k', ls='--')
@@ -838,7 +842,7 @@ class CompareCandidates(Rule):
         return est_offset, mean_wind_parallel, mean_wind_perpendicular, transect_wind_parallel, transect_wind_perpendicular
 
     @staticmethod
-    def plot_info(ds1, ds2, t1, t2, axes):
+    def plot_info(ds1, ds2, t1, t2, u_mean, v_mean, axes):
         dt = t2 - t1
         dts = dt.total_seconds()
         az1 = ds1.rhi_mean_az.mean().values.item()
@@ -847,11 +851,14 @@ class CompareCandidates(Rule):
         az2s = ds2.rhi_mean_az.values - az2
         az1s_str = '(' + ', '.join([f'{v:.2f}' for v in az1s]) + ')'
         az2s_str = '(' + ', '.join([f'{v:.2f}' for v in az2s]) + ')'
-        msg = (
-            f's1: {t1:%Y-%m-%d %H:%M:%S}, {az1:.2f}deg {az1s_str}\n'
-            f's2: {t2:%Y-%m-%d %H:%M:%S}, {az2:.2f}deg {az2s_str}\n'
-            f'dt: {dts:.2f}s'
-        )
+        wind_angle_to = np.arctan2(u_mean, v_mean) * 180 / np.pi
+        wind_angle_from = wind_angle_to + 180 % (360)
+        msg = rf'''s1: {t1:%Y-%m-%d %H:%M:%S}, {az1:.2f}$\degree$ {az1s_str}
+s2: {t2:%Y-%m-%d %H:%M:%S}, {az2:.2f}$\degree$ {az2s_str}
+dt: {dts:.2f}s
+
+wind angle to: {wind_angle_to:.2f}$\degree$
+wind angle from: {wind_angle_from:.2f}$\degree$'''
         axes[0, 0].text(0, 1, msg, ha='left', va='top')
         return dts
 
@@ -978,13 +985,14 @@ class CompareCandidates(Rule):
         axes[1].pcolormesh(ds1_sub.x, ds1_sub.z, ds1_sub.rhi_Z.values, vmin=-10, vmax=60)
         # axes[2].pcolormesh(ds1_sub.x, ds1_sub.z, np.roll(np.roll(Z2, int(offset_vec[0]), axis=0), int(offset_vec[1]), axis=1), vmin=-10, vmax=60)
         # ONLY roll in x-dir
-        axes[2].set_title(f'offset = {offset_vec[1]}')
+        axes[2].set_title(f'x-offset={offset_vec[1]}')
         axes[2].pcolormesh(ds1_sub.x, ds1_sub.z, np.roll(ds2_sub.rhi_Z.values, int(offset_vec[1]), axis=1), vmin=-10,
                            vmax=60)
 
         axes[3].pcolormesh(ds1_sub.x, ds1_sub.z,
                            np.roll(ds2_sub.rhi_Z.values, int(offset_vec[1]), axis=1) - ds1_sub.rhi_Z.values, vmin=-20,
                            vmax=20, cmap='bwr')
+        axes[3].set_title(r'$\Delta$Z (-20 to 20 dBZ)')
 
     @staticmethod
     def plot_composites_for_match(ds1_sub, ds2_sub, Z1, Z2, cl1, cl2, cloud_union, x_idxmax, x_idxmin, z_idxmax, labels1,
@@ -998,15 +1006,15 @@ class CompareCandidates(Rule):
 
         axes[1].pcolormesh(ds1_sub.x, ds1_sub.z, ds1_sub.rhi_Z, vmin=-10, vmax=60)
         axes[2].pcolormesh(ds1_sub.x, ds1_sub.z, ds2_sub.rhi_Z, vmin=-10, vmax=60)
-        axes[1].set_title(pd.Timestamp(ds1_sub.time.values.item()))
-        axes[2].set_title(pd.Timestamp(ds2_sub.time.values.item()))
+        axes[1].set_title(f'RHI 1, cloud {cl1}')
+        axes[2].set_title(f'RHI 2, cloud {cl2}')
 
     @staticmethod
     def plot_composites(ds1_comp, ds2_comp, xmin, xmax, zmax, axes):
         axes[0].pcolormesh(ds1_comp.x, ds1_comp.z, ds1_comp.rhi_Z, vmin=-10, vmax=60)
         axes[1].pcolormesh(ds1_comp.x, ds1_comp.z, ds2_comp.rhi_Z, vmin=-10, vmax=60)
-        axes[0].set_title(pd.Timestamp(ds1_comp.time.values.item()))
-        axes[1].set_title(pd.Timestamp(ds2_comp.time.values.item()))
+        axes[0].set_title('RHI 1')
+        axes[1].set_title('RHI 2')
 
         for ax in axes:
             rect = patches.Rectangle((xmin, 0), xmax - xmin, zmax,
@@ -1048,3 +1056,5 @@ class CompareCandidates(Rule):
                                  fill=False, linewidth=1)  # fill=True for solid
 
         ax.add_patch(rect)
+        ax.set_xlim(-150, 150)
+        ax.set_ylim(-150, 150)
