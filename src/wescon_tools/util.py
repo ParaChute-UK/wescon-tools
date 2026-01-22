@@ -32,9 +32,9 @@ def to_netcdf_tmp_then_copy(ds, outpath, encoding=None):
     stack = next(traceback.walk_stack(None))
     frame = stack[0]
     calling_file = frame.f_globals['__file__']
-    calling_obj = frame.f_locals['self']
-    calling_obj_doc = calling_obj.__doc__
-    calling_class_name = calling_obj.__class__.__name__
+    # calling_obj = frame.f_locals['self']
+    # calling_obj_doc = calling_obj.__doc__
+    # calling_class_name = calling_obj.__class__.__name__
     if outpath.name.startswith('.remake.tmp'):
         output_path_actual = util.tmp_to_actual_path(outpath)
     else:
@@ -44,13 +44,13 @@ def to_netcdf_tmp_then_copy(ds, outpath, encoding=None):
     remake_version = remake.__version__
 
     metadata_attrs = {
-        'created by': f'{calling_file}: {calling_class_name}',
+        'created by': f'{calling_file}',
         'calling file source': Path(calling_file).read_text(),
-        'project repository': 'https://github.com/markmuetz/MCS_PRIME',
+        'project repository': 'https://github.com/ParaChute-UK/wescon-tools',
         f'remake version': remake_version,
         'remake repository': 'https://github.com/markmuetz/remake',
-        f'task': f'{calling_obj}',
-        f'task doc': f'{calling_obj_doc}',
+        # f'task': f'{calling_obj}',
+        # f'task doc': f'{calling_obj_doc}',
         'created on': str(pd.Timestamp.now()),
         'nodename': nodename,
         'output path': str(output_path_actual),
