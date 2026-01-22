@@ -624,6 +624,13 @@ class CrossCorrelationResult:
 
 
 class CompareDeltaZCandidates(Rule):
+    """Use previously identified Delta Z candidates and analyse them together.
+
+    Handles offset along/parallel to beam, and across/perpendicular to beam.
+    Parallel is handled by a combination of using the flow-derived winds and calculating the max correlation of signals.
+    Perpendicular is handled by using the flow-derived winds to estimate which of the beams of the first bracket will
+    match those of the second.
+    """
     @staticmethod
     def rule_matrix():
         matrix = {('case', 'bracket_idx1', 'bracket_idx2'): []}
@@ -644,13 +651,21 @@ class CompareDeltaZCandidates(Rule):
     def rule_outputs(case, bracket_idx1, bracket_idx2):
         outdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / case / 'camra' / 'deltaZ_candidate'
         return {
-            f'dummy': outdir / 'comparison' / output_vn / f'{case}_{bracket_idx1}_{bracket_idx2}' / f'compare_deltaZ_{case}_{bracket_idx1}_{bracket_idx2}.dummy.out',
+            f'dummy': outdir / 'comparison' / output_vn / f'{case}_{bracket_idx1}_{bracket_idx2}' /
+                      f'compare_deltaZ_{case}_{bracket_idx1}_{bracket_idx2}.dummy.out',
         }
 
     @staticmethod
     def rule_run(inputs, outputs, case, bracket_idx1, bracket_idx2):
+        # TODO: dependencies.
+        # TODO: naming consistency. offset, parallel offset, perpendicular offset...
+        # TODO: dataclass for state?
+        # TODO: save just what's nec to reproduce figs.
+        # TODO: hardcoded magic numbers.
         ds1, ds2 = CompareDeltaZCandidates.load_data(bracket_idx1, bracket_idx2, case)
         new_beam_idxs, beam_perp_offsets = CompareDeltaZCandidates.find_all_beam_alignment(ds1, ds2)
+
+        stats = []
 
         for beam_perp_offset in set(beam_perp_offsets.values()):
             s1, s2 = sliding_offset_to_slices(beam_perp_offset)
@@ -665,74 +680,60 @@ class CompareDeltaZCandidates(Rule):
                 cl1 = int(cl1)
                 cl2 = int(cl2)
 
-                ds1_sub, ds2_sub, cloud_union, xmin, xmax, zmax, x_idxmin, x_idxmax, z_idxmax, est_offset = CompareDeltaZCandidates.subset_fields(cl1, cl2, ds1_comp, ds2_comp, labels1, labels2)
+                (ds1_sub, ds2_sub, cloud_union, xmin, xmax, zmax, x_idxmin, x_idxmax, z_idxmax,
+                 est_offset) = CompareDeltaZCandidates.subset_fields(
+                    cl1, cl2, ds1_comp, ds2_comp, labels1, labels2)
                 xmid = (xmax + xmin) / 2
                 aligned = new_beam_idxs[int(round(xmid))] == (beam_idx1, beam_idx2)
 
                 cc_result = CompareDeltaZCandidates.calc_cross_correlation(ds1_sub.rhi_Z, ds2_sub.rhi_Z)
                 for offset in cc_result.valid_parallel_offsets:
-                    if offset == cc_result.valid_parallel_offsets[np.argmin(np.abs(cc_result.valid_parallel_offsets - est_offset))]:
+                    if offset == cc_result.valid_parallel_offsets[
+                        np.argmin(np.abs(cc_result.valid_parallel_offsets - est_offset))]:
                         optimal = True
                     else:
                         optimal = False
-                    CompareDeltaZCandidates.plot_dashboard(outputs, beam_idx1, beam_idx2, bracket_idx1, bracket_idx2, cc_result, cl1,
-                                                           cl2, cloud_union, ds1, ds1_comp, ds1_sub, ds2, ds2_comp, ds2_sub, labels1,
-                                                           labels2, new_beam_idxs, offset, xmax, xmin, zmax, x_idxmin, x_idxmax, z_idxmax)
-                    CompareDeltaZCandidates.save_results(outputs, cc_result, ds1_sub, ds2_sub, offset, cl1, cl2, optimal, aligned)
+                    figname = CompareDeltaZCandidates.plot_dashboard(outputs, beam_idx1, beam_idx2, bracket_idx1,
+                                                                     bracket_idx2, cc_result, cl1,
+                                                                     cl2, cloud_union, ds1, ds1_comp, ds1_sub, ds2,
+                                                                     ds2_comp, ds2_sub, labels1,
+                                                                     labels2, new_beam_idxs, offset, xmax, xmin, zmax,
+                                                                     x_idxmin, x_idxmax, z_idxmax)
+                    CompareDeltaZCandidates.save_results(outputs, cc_result, ds1_sub, ds2_sub, offset, cl1, cl2,
+                                                         optimal, aligned)
 
+                    def get_obj_field(objs, cl, field):
+                        obj_cloud_idx = np.where(objs.isel(time=0).cloud_label.values == cl)[0].item()
+                        return objs.isel(time=0).sel(reflectivity_thresh=10)[field].values[obj_cloud_idx]
+
+                    deltaZ = np.roll(ds2_sub.rhi_Z.values, int(offset), axis=1) - ds1_sub.rhi_Z.values
+                    stats_entry = {
+                        'case': case,
+                        'bracket_idx1': bracket_idx1,
+                        'bracket_idx2': bracket_idx2,
+                        'time1': pd.Timestamp(ds1_comp.time.values.item()),
+                        'time2': pd.Timestamp(ds2_comp.time.values.item()),
+                        'cl1': cl1,
+                        'cl2': cl2,
+                        'beam_perp_offset': beam_perp_offset,
+                        'beam_parallel_offset': offset,
+                        'optimal_parallel_offset': optimal,
+                        'aligned_perp_offset': aligned,
+                        'o1_cloud_max_z': get_obj_field(objs1, cl1, 'cloud_max_z'),
+                        'o2_cloud_max_z': get_obj_field(objs2, cl2, 'cloud_max_z'),
+                        'deltaZ_mean': np.nanmean(deltaZ),
+                        'deltaZ_absmean': np.nanmean(np.abs(deltaZ)),
+                        'deltaZ_posmean': np.nanmean(deltaZ[deltaZ > 0]),
+                        'figname': str(figname),
+                    }
+                    stats.append(stats_entry)
+
+        if stats:
+            df = pd.DataFrame(stats)
+            stats_file = outputs['dummy'].parent / 'stats.hdf'
+            df.to_hdf(stats_file, key='stats')
 
         outputs['dummy'].touch()
-
-    @staticmethod
-    def plot_dashboard(outputs, beam_idx1, beam_idx2, bracket_idx1, bracket_idx2, cc_result, cl1, cl2, cloud_union, ds1, ds1_comp, ds1_sub,
-                       ds2, ds2_comp, ds2_sub, labels1, labels2, new_beam_idxs, offset, xmax, xmin, zmax, x_idxmin, x_idxmax, z_idxmax):
-        fig, axes = CompareDeltaZCandidates.create_fig_axes()
-
-        u_mean = ds1_comp.nimrod_flow_vec_x.mean().values.item()
-        v_mean = ds1_comp.nimrod_flow_vec_y.mean().values.item()
-        t1 = pd.Timestamp(ds1_comp.time.values.item())
-        t2 = pd.Timestamp(ds2_comp.time.values.item())
-
-        dts = CompareDeltaZCandidates.plot_info(ds1, ds2, t1, t2, u_mean, v_mean, axes)
-        CompareDeltaZCandidates.plot_radarnet_combined(ds1, ds2, axes[0, 3], xmin, xmax)
-        CompareDeltaZCandidates.plot_radarnet(ds1, ds2, xmin, xmax, axes[1, 3], axes[2, 3], beam_idx1, beam_idx2)
-
-        CompareDeltaZCandidates.plot_composites(ds1_comp, ds2_comp, xmin, xmax, zmax, axes[1:3, 0])
-        CompareDeltaZCandidates.plot_composites_for_match(ds1_sub, ds2_sub, cc_result.Z1, cc_result.Z2, cl1, cl2, cloud_union, x_idxmax,
-                                                          x_idxmin,
-                                                          z_idxmax, labels1, labels2, axes[:3, 1])
-        offset_vec = (0, offset)
-        CompareDeltaZCandidates.plot_dZ(ds1_sub, ds2_sub, cc_result.Z1, cc_result.Z2, offset_vec, axes[:, 2])
-
-        (est_offset, mean_wind_parallel, mean_wind_perpendicular, transect_wind_parallel,
-         transect_wind_perpendicular) = CompareDeltaZCandidates.calc_parallel_perpendicular_winds(ds1_comp, dts,
-                                                                                                  x_idxmin, x_idxmax)
-
-        xmid = (xmax + xmin) / 2
-        aligned = new_beam_idxs[int(round(xmid))] == (beam_idx1, beam_idx2)
-
-        if offset == cc_result.valid_parallel_offsets[np.argmin(np.abs(cc_result.valid_parallel_offsets - est_offset))]:
-            optimal = True
-        else:
-            optimal = False
-        print(f'optimal: {optimal}')
-        CompareDeltaZCandidates.plot_cross_corr(cc_result, offset, optimal, axes[3, 0])
-
-        ax = axes[3, 1]
-        ax.set_title(
-            f'par={mean_wind_parallel:.2f}, perp={mean_wind_perpendicular:.2f} [m/s], est x-offset={est_offset:.2f}')
-        ax.plot(ds1_comp.x.values, transect_wind_parallel)
-        ax.plot(ds1_comp.x.values, transect_wind_perpendicular)
-        ax.set_xlim(xmin, xmax)
-
-        fname = (f'dashboard.{bracket_idx1}_{bracket_idx2}.'
-                 f'{t1:%Y-%m-%d_%H%M%S}_{t2:%Y-%m-%d_%H%M%S}.'
-                 f'{cl1}_{cl2}.'
-                 f'{offset=}.{optimal=}.{aligned=}.'
-                 f'a1={beam_idx1}.a2={beam_idx2}.png'.replace(' ', ''))
-        print(fname)
-        figdir = outputs['dummy'].parent
-        plt.savefig(figdir / fname)
 
     @staticmethod
     def load_data(bracket_idx1, bracket_idx2, case):
@@ -789,7 +790,7 @@ class CompareDeltaZCandidates(Rule):
     def calc_parallel_perpendicular_winds(ds1_comp, dts, x_idxmin, x_idxmax):
         """Based on the beam over x_idxmin/max, calc the parallel and perpendicular winds.
 
-        Use the flow-derived wind from ds1 (i.e. at the first time.
+        Use the flow-derived wind from ds1 (i.e. at the first time).
         Also calculate the estimated parallel offset."""
         az_mean = ds1_comp.rhi_mean_az.values.mean()
         transect_dist = ds1_comp.x.values
@@ -946,6 +947,58 @@ class CompareDeltaZCandidates(Rule):
             valid_parallel_offsets=ccidx[np.intersect1d(peaks_above_ptile, peaks_not_too_far)]
         )
         return cc_result
+
+    @staticmethod
+    def plot_dashboard(outputs, beam_idx1, beam_idx2, bracket_idx1, bracket_idx2, cc_result, cl1, cl2, cloud_union, ds1, ds1_comp, ds1_sub,
+                       ds2, ds2_comp, ds2_sub, labels1, labels2, new_beam_idxs, offset, xmax, xmin, zmax, x_idxmin, x_idxmax, z_idxmax):
+        fig, axes = CompareDeltaZCandidates.create_fig_axes()
+
+        u_mean = ds1_comp.nimrod_flow_vec_x.mean().values.item()
+        v_mean = ds1_comp.nimrod_flow_vec_y.mean().values.item()
+        t1 = pd.Timestamp(ds1_comp.time.values.item())
+        t2 = pd.Timestamp(ds2_comp.time.values.item())
+
+        dts = CompareDeltaZCandidates.plot_info(ds1, ds2, t1, t2, u_mean, v_mean, axes)
+        CompareDeltaZCandidates.plot_radarnet_combined(ds1, ds2, axes[0, 3], xmin, xmax)
+        CompareDeltaZCandidates.plot_radarnet(ds1, ds2, xmin, xmax, axes[1, 3], axes[2, 3], beam_idx1, beam_idx2)
+
+        CompareDeltaZCandidates.plot_composites(ds1_comp, ds2_comp, xmin, xmax, zmax, axes[1:3, 0])
+        CompareDeltaZCandidates.plot_composites_for_match(ds1_sub, ds2_sub, cc_result.Z1, cc_result.Z2, cl1, cl2, cloud_union, x_idxmax,
+                                                          x_idxmin,
+                                                          z_idxmax, labels1, labels2, axes[:3, 1])
+        offset_vec = (0, offset)
+        CompareDeltaZCandidates.plot_dZ(ds1_sub, ds2_sub, cc_result.Z1, cc_result.Z2, offset_vec, axes[:, 2])
+
+        (est_offset, mean_wind_parallel, mean_wind_perpendicular, transect_wind_parallel,
+         transect_wind_perpendicular) = CompareDeltaZCandidates.calc_parallel_perpendicular_winds(ds1_comp, dts,
+                                                                                                  x_idxmin, x_idxmax)
+
+        xmid = (xmax + xmin) / 2
+        aligned = new_beam_idxs[int(round(xmid))] == (beam_idx1, beam_idx2)
+
+        if offset == cc_result.valid_parallel_offsets[np.argmin(np.abs(cc_result.valid_parallel_offsets - est_offset))]:
+            optimal = True
+        else:
+            optimal = False
+        print(f'optimal: {optimal}')
+        CompareDeltaZCandidates.plot_cross_corr(cc_result, offset, optimal, axes[3, 0])
+
+        ax = axes[3, 1]
+        ax.set_title(
+            f'par={mean_wind_parallel:.2f}, perp={mean_wind_perpendicular:.2f} [m/s], est x-offset={est_offset:.2f}')
+        ax.plot(ds1_comp.x.values, transect_wind_parallel)
+        ax.plot(ds1_comp.x.values, transect_wind_perpendicular)
+        ax.set_xlim(xmin, xmax)
+
+        fname = (f'dashboard.{bracket_idx1}_{bracket_idx2}.'
+                 f'{t1:%Y-%m-%d_%H%M%S}_{t2:%Y-%m-%d_%H%M%S}.'
+                 f'{cl1}_{cl2}.'
+                 f'{offset=}.{optimal=}.{aligned=}.'
+                 f'a1={beam_idx1}.a2={beam_idx2}.png'.replace(' ', ''))
+        print(fname)
+        figdir = outputs['dummy'].parent
+        plt.savefig(figdir / fname)
+        return figdir / fname
 
     @staticmethod
     def save_results(outputs, cc_result, ds1_sub, ds2_sub, offset, cl1, cl2, optimal, aligned):
