@@ -7,9 +7,8 @@ PATHS = {
     'outdir': Path('/gws/nopw/j04/mcs_prime/mmuetz/upflo/data/upflo_wp1_output'),
     'figdir': Path('/gws/nopw/j04/mcs_prime/mmuetz/upflo/data/upflo_wp1_figs'),
     'kasbexoutdir': Path(f'/gws/nopw/j04/parachute/mmuetz/data/kasbex/{KASBEX_OUTPUT_VN}'),
-    # Checking this dir causing proc to hang.
-    # 'era5dir': Path('/does/not/exist'),
-    # 'era5dir': Path('/badc/ecmwf-era5'),
+    'kepler_raw': Path('/gws/pw/j07/woest/data/ncas-mobile-ka-band-radar-1/L1_final/v1.0.0/iop/data/'),
+    'camra_raw': Path('/gws/pw/j07/woest/data/ncas-radar-camra-1/L1_final/iop/data/'),
 }
 
 DATADIR = PATHS['datadir']
