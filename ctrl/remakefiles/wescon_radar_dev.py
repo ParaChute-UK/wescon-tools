@@ -333,6 +333,7 @@ class PlotRegriddedCAMRaKeplerL1(Rule):
 
 class FindCamraKeplerMatch(Rule):
     """Find CAMRa/Kepler scans that occur close to each other and calc intersection."""
+    enabled = False
     rule_matrix = {'case': conf.CASES}
 
     @staticmethod
@@ -390,6 +391,7 @@ class FindCamraKeplerMatch(Rule):
 
 class PlotCamraKeplerMatch(Rule):
     """Plot matches between CAMRa/Kepler."""
+    enabled = False
     rule_matrix = {'case': conf.CASES}
 
     @staticmethod
@@ -516,7 +518,7 @@ class FindCandidateDeltaZ(Rule):
 
     @staticmethod
     def rule_run(inputs, outputs, case):
-        paths = inputs['paths']
+        paths = inputs.values()
 
         time = []
         az = []
