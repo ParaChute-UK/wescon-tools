@@ -1277,20 +1277,20 @@ class MatchRHIsToStorms(Rule):
     @staticmethod
     def rule_run(inputs, outputs, case):
         outdir = outputs['dummy'].parent
-        da, dfg, ds, scans = MatchRHIsToStorms.load_data(case, inputs)
+        df_stats, df_scans, df_storms, ds_storms  = MatchRHIsToStorms.load_data(case, inputs)
 
-        for i in range(len(dfg)):
+        for i in range(len(df_stats)):
             # fields available can be seen in stats_entry
-            row = dfg.iloc[i]
+            row = df_stats.iloc[i]
             xmin = row.xmin
             xmax = row.xmax
 
-            ds_sub = MatchRHIsToStorms.load_rhis(scans, row, xmin, xmax)
+            ds_sub = MatchRHIsToStorms.load_rhis(df_scans, row, xmin, xmax)
             transect_dist = np.arange(xmin, xmax) * 1e3  # km to m.
 
             for scan_idx in [1, 2]:
                 time = row[f'time{scan_idx}']
-                storm_labels = ds.storm_labels.sel(time=time, method='nearest')
+                storm_labels = ds_storms.storm_labels.sel(time=time, method='nearest')
                 az_mean = row[f'az_mean{scan_idx}']
 
                 # Find the labels by doing nearest neighbour interp along transect.
@@ -1302,12 +1302,12 @@ class MatchRHIsToStorms(Rule):
                 unique_labels = unique_labels[unique_labels != 0]
                 print(unique_labels)
 
-                MatchRHIsToStorms.plot_rhi_storm_intersections(da, ds_sub, i, outdir, scan_idx, storm_labels, time,
+                MatchRHIsToStorms.plot_rhi_storm_intersections(ds_storms.rain, ds_sub, i, outdir, scan_idx, storm_labels, time,
                                                                transect_x, transect_y, unique_labels, xmax, xmin)
 
     @staticmethod
     def load_data(case, inputs):
-        scans = pd.read_hdf(inputs['scans'])
+        df_scans = pd.read_hdf(inputs['scans'])
 
         year, month, day = int(case[:4]), int(case[4:6]), int(case[6:])
         datadir = conf.PATHS['datadir'] / f'radarnet/{year}/{month:02d}/{day:02d}'
@@ -1318,15 +1318,18 @@ class MatchRHIsToStorms(Rule):
 
         dirpath = conf.PATHS['datadir'] / f'upflo_wp1_output/simple_track/{year}/{month:02d}/{day:02d}/'
         path = list(dirpath.glob('storm_labels_*.nc'))[0]
-        ds = xr.load_dataset(path)
-        ds['rain'] = da
-        print(ds)
+        ds_storms = xr.load_dataset(path)
+        ds_storms['rain'] = da
+        print(ds_storms)
+
+        path = list(dirpath.glob('storm_data_*.nc'))[0]
+        df_storms = pd.read_hdf(path, key='storm_data')
+        ds_storms['rain'] = da
 
         df = pd.read_hdf(inputs['gathered_stats'], key='gathered_stats')
         # Only keep optimal along beam and aligned across beam.
-        dfg = df[df.optimal_parallel_offset & df.aligned_perp_offset]
-        print(dfg)
-        return da, dfg, ds, scans
+        df_stats = df[df.optimal_parallel_offset & df.aligned_perp_offset]
+        return df_stats, df_scans, df_storms, ds_storms
 
     @staticmethod
     def load_rhis(scans, row, xmin, xmax):
