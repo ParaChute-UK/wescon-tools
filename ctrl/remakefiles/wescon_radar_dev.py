@@ -1354,6 +1354,8 @@ class MatchRHIsToStorms(Rule):
         # fig, ax = plt.subplots(1, 1, subplot_kw=dict(projection=CustomOSGB()), figsize=(15, 15), layout='constrained')
         ax1.coastlines()
         L = xmax * 1e3 - xmin * 1e3 + 5e3
+        mid_x = (transect_x[0] + transect_x[-1]) / 2
+        mid_y = (transect_y[0] + transect_y[-1]) / 2
         ax1.set_xlim((mid_x - L, mid_x + L))
         ax1.set_ylim((mid_y - L, mid_y + L))
 
