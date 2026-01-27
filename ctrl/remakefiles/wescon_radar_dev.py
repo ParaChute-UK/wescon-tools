@@ -25,6 +25,7 @@ from scipy.signal import find_peaks
 
 import proj_config as conf
 from remake import Remake, Rule
+from simple_track.nimrod_user_functions import FileLoader
 from wescon_tools.custom_osgb import CustomOSGB
 from wescon_tools.flow_interp import FlowInterp
 from wescon_tools.radar_intersection import RadarIntersectionCalculator, RadarIntersection
@@ -663,6 +664,9 @@ class CompareDeltaZCandidates(Rule):
             if inputs['brackets'].exists():
                 brackets = pd.read_hdf(inputs['brackets'], key='brackets')
                 for i in range(1, len(brackets)):
+                    # TODO:! Temporary hack! Only do for 4 times so I can check out subsequent code.
+                    if i > 4:
+                        break
                     if brackets.iloc[i]['deltaZ_candidate']:
                         matrix[('case', 'bracket_idx1', 'bracket_idx2')].append((case, i - 1, i))
         return matrix
@@ -721,9 +725,15 @@ class CompareDeltaZCandidates(Rule):
                         return objs.isel(time=0).sel(reflectivity_thresh=10)[field].values[obj_cloud_idx]
 
                     deltaZ = np.roll(ds2_sub.rhi_Z.values, int(corr_parallel_offset), axis=1) - ds1_sub.rhi_Z.values
+                    az_mean1 = ds1_comp.rhi_mean_az.values.mean()
+                    az_mean2 = ds2_comp.rhi_mean_az.values.mean()
+                    # TODO: save info on winds for easy reference.
                     stats_entry = {'case': case, 'bracket_idx1': bracket_idx1, 'bracket_idx2': bracket_idx2,
                         'time1': pd.Timestamp(ds1_comp.time.values.item()),
-                        'time2': pd.Timestamp(ds2_comp.time.values.item()), 'cl1': cl1, 'cl2': cl2,
+                        'time2': pd.Timestamp(ds2_comp.time.values.item()),
+                        'az_mean1': az_mean1, 'az_mean2': az_mean2,
+                        'xmin': xmin, 'xmax': xmax, 'zmax': zmax,
+                        'cl1': cl1, 'cl2': cl2,
                         'perp_offset': perp_offset, 'parallel_offset': corr_parallel_offset,
                         'optimal_parallel_offset': optimal, 'aligned_perp_offset': aligned,
                         'o1_cloud_max_z': get_obj_field(objs1, cl1, 'cloud_max_z'),
@@ -1219,3 +1229,142 @@ wind angle from: {wind_angle_from:.2f}$\degree$'''
         ax.add_patch(rect)
         ax.set_xlim(-150, 150)
         ax.set_ylim(-150, 150)
+
+
+class GatherDeltaZStats(Rule):
+    """Gather all scattered stats.hdf files into a single file for each case."""
+    rule_matrix = {'case': conf.CASES}
+
+    @staticmethod
+    def rule_inputs(case):
+        matrix = CompareDeltaZCandidates.rule_matrix()
+        inputs = {}
+        for testcase, bracket_idx1, bracket_idx2 in matrix['case', 'bracket_idx1', 'bracket_idx2']:
+            if testcase != case:
+                continue
+            dz_outputs = CompareDeltaZCandidates.rule_outputs(case, bracket_idx1, bracket_idx2)['dummy']
+            inputs[str(dz_outputs)] = dz_outputs
+        return inputs
+
+    @staticmethod
+    def rule_outputs(case):
+        outdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
+        return {'gathered_stats': outdir / 'comparison' / 'gathered_stats.hdf'}
+
+    @staticmethod
+    def rule_run(inputs, outputs, case):
+        outfile = outputs['gathered_stats']
+        stats_hdfs = sorted(outfile.parent.glob('*/stats.hdf'))
+        df = pd.concat([pd.read_hdf(h) for h in stats_hdfs], ignore_index=True)
+        df.to_hdf(outfile, key='gathered_stats')
+
+
+class MatchRHIsToStorms(Rule):
+    """For the deltaZ candidates, match the scans (first and second) to the radarnet tracked storms."""
+    rule_matrix = {'case': conf.CASES}
+
+    @staticmethod
+    def rule_inputs(case):
+        inputs = FindCandidateDeltaZ.rule_outputs(case)
+        inputs.update(GatherDeltaZStats.rule_outputs(case))
+        return inputs
+
+    @staticmethod
+    def rule_outputs(case):
+        outdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
+        return {'dummy': outdir / 'rhi_storm_match' / 'match_rhis_storms.dummy'}
+
+    @staticmethod
+    def rule_run(inputs, outputs, case):
+        outdir = outputs['dummy'].parent
+        da, dfg, ds, scans = MatchRHIsToStorms.load_data(case, inputs)
+
+        for i in range(len(dfg)):
+            # fields available can be seen in stats_entry
+            row = dfg.iloc[i]
+            xmin = row.xmin
+            xmax = row.xmax
+
+            ds_sub = MatchRHIsToStorms.load_rhis(scans, row, xmin, xmax)
+            transect_dist = np.arange(xmin, xmax) * 1e3  # km to m.
+
+            for scan_idx in [1, 2]:
+                time = row[f'time{scan_idx}']
+                storm_labels = ds.storm_labels.sel(time=time, method='nearest')
+                az_mean = row[f'az_mean{scan_idx}']
+
+                # Find the labels by doing nearest neighbour interp along transect.
+                transect_x = xr.DataArray(transect_dist * np.sin(az_mean * np.pi / 180) + CHIL_X, dims='transect')
+                transect_y = xr.DataArray(transect_dist * np.cos(az_mean * np.pi / 180) + CHIL_Y, dims='transect')
+                transect_labels = storm_labels.interp(eastings=transect_x, northings=transect_y, method='nearest')
+
+                unique_labels = np.unique(transect_labels.values)
+                unique_labels = unique_labels[unique_labels != 0]
+                print(unique_labels)
+
+                MatchRHIsToStorms.plot_rhi_storm_intersections(da, ds_sub, i, outdir, scan_idx, storm_labels, time,
+                                                               transect_x, transect_y, unique_labels, xmax, xmin)
+
+    @staticmethod
+    def load_data(case, inputs):
+        scans = pd.read_hdf(inputs['scans'])
+
+        year, month, day = int(case[:4]), int(case[4:6]), int(case[6:])
+        datadir = conf.PATHS['datadir'] / f'radarnet/{year}/{month:02d}/{day:02d}'
+        path = datadir / f'metoffice-c-band-rain-radar_uk_{case}.nc'
+        # All this ensures I'm using the same subdomain as for the tracking.
+        loader = FileLoader([path], chilbolton_centred=True)
+        da = loader.curr_da.load()
+
+        dirpath = conf.PATHS['datadir'] / f'upflo_wp1_output/simple_track/{year}/{month:02d}/{day:02d}/'
+        path = list(dirpath.glob('storm_labels_*.nc'))[0]
+        ds = xr.load_dataset(path)
+        ds['rain'] = da
+        print(ds)
+
+        df = pd.read_hdf(inputs['gathered_stats'], key='gathered_stats')
+        # Only keep optimal along beam and aligned across beam.
+        dfg = df[df.optimal_parallel_offset & df.aligned_perp_offset]
+        print(dfg)
+        return da, dfg, ds, scans
+
+    @staticmethod
+    def load_rhis(scans, row, xmin, xmax):
+        b1paths = scans[scans.bracket == row.bracket_idx1]['path'].values
+        b2paths = scans[scans.bracket == row.bracket_idx2]['path'].values
+        perp_offset = row.perp_offset
+        s1, s2 = sliding_offset_to_slices(perp_offset)
+        ds_sub = {
+            1: xr.open_mfdataset(b1paths[s1]).sel(x=slice(xmin, xmax)).mean(dim='time'),
+            2: xr.open_mfdataset(b2paths[s2]).sel(x=slice(xmin, xmax)).mean(dim='time'),
+        }
+        return ds_sub
+
+    @staticmethod
+    def plot_rhi_storm_intersections(da, ds_sub, i, outdir, scan_idx, storm_labels, time, transect_x, transect_y,
+                                     unique_labels, xmax, xmin):
+        fig = plt.figure(layout='constrained', figsize=(16, 12))
+        gs = gridspec.GridSpec(ncols=2, nrows=1, figure=fig)
+        ax1 = fig.add_subplot(gs[0, 0], projection=CustomOSGB())
+        ax2 = fig.add_subplot(gs[0, 1])
+
+        # fig, ax = plt.subplots(1, 1, subplot_kw=dict(projection=CustomOSGB()), figsize=(15, 15), layout='constrained')
+        ax1.coastlines()
+        L = xmax * 1e3 - xmin * 1e3 + 5e3
+        ax1.set_xlim((mid_x - L, mid_x + L))
+        ax1.set_ylim((mid_y - L, mid_y + L))
+
+        # ax1.pcolormesh(storm_labels.eastings, storm_labels.northings, ds.rain.sel(time=time, method='nearest'))
+        levels = [0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64]
+        colors = ((0, 0, 0.6), 'b', 'c', 'g', 'y', (1, 0.5, 0), 'r', 'm', (0.6, 0.6, 0.6))
+
+        ax1.contourf(da.eastings, da.northings, da.sel(time=time, method='nearest'), levels=levels, colors=colors)
+        for label in unique_labels:
+            pdata = storm_labels.values == label
+            pdata = np.ma.masked_array(pdata, pdata == 0)
+            ax1.pcolormesh(storm_labels.eastings, storm_labels.northings, pdata)
+        ax1.plot(transect_x, transect_y)
+
+        ax2.pcolormesh(ds_sub[scan_idx].x, ds_sub[scan_idx].z, ds_sub[scan_idx].rhi_Z, vmin=-10, vmax=60)
+        plt.savefig(outdir / f'rhi_storm_match.{i}.{scan_idx}.png')
+
