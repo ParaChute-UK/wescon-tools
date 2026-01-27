@@ -1,7 +1,8 @@
 from remake import Remake, Rule
-from simple_track import nimrod_driver
+from simple_track import nimrod_user_functions
 
 from proj_config import PATHS, CASES, KASBEX_CASES
+from simple_track.storm_track import StormTracker
 
 slurm_config = {'account': 'mcs_prime', 'partition': 'standard', 'qos': 'short', 'mem': 64000}
 rmk = Remake(config=dict(slurm=slurm_config))
@@ -36,8 +37,10 @@ class TrackDay(Rule):
     def rule_run(inputs, outputs, case, tracking_method):
         path = inputs['radarnet']
         outdir = outputs['dummy'].parent
-        nimrod_driver.nimrod_driver([path], str(outdir) + '/', tracking_method=tracking_method)
+        chilbolton_centred = True
+
+        loader = nimrod_user_functions.FileLoader([path], chilbolton_centred=chilbolton_centred)
+        tracker = StormTracker(loader=loader, outdir=outdir)
+        tracker.track_storms()
+
         outputs['dummy'].touch()
-
-
-
