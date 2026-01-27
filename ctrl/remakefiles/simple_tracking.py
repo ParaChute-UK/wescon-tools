@@ -16,7 +16,7 @@ class TrackDay(Rule):
         day = case[6:8]
 
         # /gws/nopw/j04/mcs_prime/mmuetz/upflo/data/nimrod/2025/09/11/metoffice-c-band-rain-radar_uk_20250911.nc
-        return {'radarnet': f'/gws/nopw/j04/mcs_prime/mmuetz/upflo/data/nimrod/{year}/{month}/{day}/'
+        return {'radarnet': f'/gws/nopw/j04/mcs_prime/mmuetz/upflo/data/radarnet/{year}/{month}/{day}/'
                             f'metoffice-c-band-rain-radar_uk_{year}{month}{day}.nc'}
 
     @staticmethod
@@ -37,5 +37,7 @@ class TrackDay(Rule):
         path = inputs['radarnet']
         outdir = outputs['dummy'].parent
         nimrod_driver.nimrod_driver([path], str(outdir) + '/', tracking_method=tracking_method)
+        outputs['dummy'].touch()
+
 
 
