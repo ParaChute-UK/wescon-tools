@@ -664,9 +664,6 @@ class CompareDeltaZCandidates(Rule):
             if inputs['brackets'].exists():
                 brackets = pd.read_hdf(inputs['brackets'], key='brackets')
                 for i in range(1, len(brackets)):
-                    # TODO:! Temporary hack! Only do for 4 times so I can check out subsequent code.
-                    if i > 4:
-                        break
                     if brackets.iloc[i]['deltaZ_candidate']:
                         matrix[('case', 'bracket_idx1', 'bracket_idx2')].append((case, i - 1, i))
         return matrix
@@ -1304,6 +1301,7 @@ class MatchRHIsToStorms(Rule):
 
                 MatchRHIsToStorms.plot_rhi_storm_intersections(ds_storms.rain, ds_sub, i, outdir, scan_idx, storm_labels, time,
                                                                transect_x, transect_y, unique_labels, xmax, xmin)
+        outputs['dummy'].touch()
 
     @staticmethod
     def load_data(case, inputs):
