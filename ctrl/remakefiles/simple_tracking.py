@@ -44,8 +44,9 @@ class TrackDay(Rule):
         tracker = StormTracker(loader=loader, outdir=outdir, threshold=tracking_precip_thresh)
         tracker.track_storms()
         tracker.write_output(
-            storm_labels_tpl='storm_labels_{nstorms}.precip_thresh_{tracking_precip_thresh}.nc',
-            storm_data_tpl='storm_data_{nstorms}.precip_thresh_{tracking_precip_thresh}.hdf',
+            # Only fill in the tracking_precip_thresh template value.
+            storm_labels_tpl=f'storm_labels_{{nstorms}}.precip_thresh_{tracking_precip_thresh}.nc',
+            storm_data_tpl=f'storm_data_{{nstorms}}.precip_thresh_{tracking_precip_thresh}.hdf',
         )
 
         outputs['dummy'].touch()
