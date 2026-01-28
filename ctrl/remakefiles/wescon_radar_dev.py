@@ -1269,14 +1269,17 @@ class MatchRHIsToStorms(Rule):
     @staticmethod
     def rule_outputs(case):
         outdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
-        return {'dummy': outdir / 'rhi_storm_match' / 'match_rhis_storms.dummy'}
+        return {'match_rhi_storm_stats': outdir / 'rhi_storm_match' / 'match_rhis_storm_stats.hdf'}
 
     @staticmethod
     def rule_run(inputs, outputs, case):
-        outdir = outputs['dummy'].parent
+        outdir = outputs['match_rhi_storm_stats'].parent
         df_stats, df_scans, df_storms, ds_storms  = MatchRHIsToStorms.load_data(case, inputs)
 
+        df_data = []
+
         for i in range(len(df_stats)):
+            # logger.info(f'{i + 1}/{len(df_stats)}')
             # fields available can be seen in stats_entry
             row = df_stats.iloc[i]
             xmin = row.xmin
@@ -1288,6 +1291,8 @@ class MatchRHIsToStorms(Rule):
             for scan_idx in [1, 2]:
                 time = row[f'time{scan_idx}']
                 storm_labels = ds_storms.storm_labels.sel(time=time, method='nearest')
+                storm_time = pd.Timestamp(storm_labels.time.values.item())
+
                 az_mean = row[f'az_mean{scan_idx}']
 
                 # Find the labels by doing nearest neighbour interp along transect.
@@ -1295,13 +1300,30 @@ class MatchRHIsToStorms(Rule):
                 transect_y = xr.DataArray(transect_dist * np.cos(az_mean * np.pi / 180) + CHIL_Y, dims='transect')
                 transect_labels = storm_labels.interp(eastings=transect_x, northings=transect_y, method='nearest')
 
-                unique_labels = np.unique(transect_labels.values)
-                unique_labels = unique_labels[unique_labels != 0]
-                print(unique_labels)
+                unique_storm_labels = np.unique(transect_labels.values)
+                unique_storm_labels = unique_storm_labels[unique_storm_labels != 0]
+                def storm_label_to_idx(df, time, label):
+                    storm_row = df[(df.time == time) & (df.storm_label_idx.values == label)]
+                    assert len(storm_row) == 1
+                    return int(storm_row.iloc[0].storm_idx)
 
-                MatchRHIsToStorms.plot_rhi_storm_intersections(ds_storms.rain, ds_sub, i, outdir, scan_idx, storm_labels, time,
-                                                               transect_x, transect_y, unique_labels, xmax, xmin)
-        outputs['dummy'].touch()
+                df_data.append({
+                    'df_stats_idx': row.name,
+                    'scan_idx': scan_idx,
+                    'rhi_time': time,
+                    'storm_time': storm_time,
+                    'nstorms': len(unique_storm_labels),
+                    **{f'storm_label{j + 1}': int(unique_storm_labels[j]) for j in range(len(unique_storm_labels))},
+                    **{f'storm_idx{j + 1}': storm_label_to_idx(df_storms, storm_time, unique_storm_labels[j])
+                       for j in range(len(unique_storm_labels))},
+                })
+                print(df_data[-1])
+
+                # MatchRHIsToStorms.plot_rhi_storm_intersections(ds_storms.rain, ds_sub, i, outdir, scan_idx, storm_labels, time,
+                #                                                transect_x, transect_y, unique_storm_labels, xmax, xmin)
+        df_rhi_storm_stats = pd.DataFrame(df_data)
+        print(df_rhi_storm_stats)
+        df_rhi_storm_stats.to_hdf(outputs['match_rhi_storm_stats'], key='rhi_storm_stats')
 
     @staticmethod
     def load_data(case, inputs):
@@ -1320,7 +1342,7 @@ class MatchRHIsToStorms(Rule):
         ds_storms['rain'] = da
         print(ds_storms)
 
-        path = list(dirpath.glob('storm_data_*.nc'))[0]
+        path = list(dirpath.glob('storm_data_*.hdf'))[0]
         df_storms = pd.read_hdf(path, key='storm_data')
         ds_storms['rain'] = da
 
@@ -1343,7 +1365,7 @@ class MatchRHIsToStorms(Rule):
 
     @staticmethod
     def plot_rhi_storm_intersections(da, ds_sub, i, outdir, scan_idx, storm_labels, time, transect_x, transect_y,
-                                     unique_labels, xmax, xmin):
+                                     unique_storm_labels, xmax, xmin):
         fig = plt.figure(layout='constrained', figsize=(16, 12))
         gs = gridspec.GridSpec(ncols=2, nrows=1, figure=fig)
         ax1 = fig.add_subplot(gs[0, 0], projection=CustomOSGB())
@@ -1362,7 +1384,7 @@ class MatchRHIsToStorms(Rule):
         colors = ((0, 0, 0.6), 'b', 'c', 'g', 'y', (1, 0.5, 0), 'r', 'm', (0.6, 0.6, 0.6))
 
         ax1.contourf(da.eastings, da.northings, da.sel(time=time, method='nearest'), levels=levels, colors=colors)
-        for label in unique_labels:
+        for label in unique_storm_labels:
             pdata = storm_labels.values == label
             pdata = np.ma.masked_array(pdata, pdata == 0)
             ax1.pcolormesh(storm_labels.eastings, storm_labels.northings, pdata)
@@ -1370,4 +1392,5 @@ class MatchRHIsToStorms(Rule):
 
         ax2.pcolormesh(ds_sub[scan_idx].x, ds_sub[scan_idx].z, ds_sub[scan_idx].rhi_Z, vmin=-10, vmax=60)
         plt.savefig(outdir / f'rhi_storm_match.{i}.{scan_idx}.png')
+        plt.close('all')
 
