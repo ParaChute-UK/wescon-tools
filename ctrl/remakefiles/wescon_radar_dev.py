@@ -1258,23 +1258,28 @@ class GatherDeltaZStats(Rule):
 
 class MatchRHIsToStorms(Rule):
     """For the deltaZ candidates, match the scans (first and second) to the radarnet tracked storms."""
-    rule_matrix = {'case': conf.CASES}
+    rule_matrix = {
+        'case': conf.CASES,
+        'tracking_precip_thresh': [1., 3., 5.],
+    }
 
     @staticmethod
-    def rule_inputs(case):
+    def rule_inputs(case, tracking_precip_thresh):
         inputs = FindCandidateDeltaZ.rule_outputs(case)
         inputs.update(GatherDeltaZStats.rule_outputs(case))
         return inputs
 
     @staticmethod
-    def rule_outputs(case):
+    def rule_outputs(case, tracking_precip_thresh):
         outdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
-        return {'match_rhi_storm_stats': outdir / 'rhi_storm_match' / 'match_rhis_storm_stats.hdf'}
+        return {'match_rhi_storm_stats': (outdir / 'rhi_storm_match' /
+                                          f'tracking_precip_thresh_{tracking_precip_thresh}' /
+                                          'match_rhis_storm_stats.hdf')}
 
     @staticmethod
-    def rule_run(inputs, outputs, case):
+    def rule_run(inputs, outputs, case, tracking_precip_thresh):
         outdir = outputs['match_rhi_storm_stats'].parent
-        df_stats, df_scans, df_storms, ds_storms  = MatchRHIsToStorms.load_data(case, inputs)
+        df_stats, df_scans, df_storms, ds_storms  = MatchRHIsToStorms.load_data(case, inputs, tracking_precip_thresh)
 
         df_data = []
 
@@ -1326,7 +1331,7 @@ class MatchRHIsToStorms(Rule):
         df_rhi_storm_stats.to_hdf(outputs['match_rhi_storm_stats'], key='rhi_storm_stats')
 
     @staticmethod
-    def load_data(case, inputs):
+    def load_data(case, inputs, tracking_precip_thresh):
         df_scans = pd.read_hdf(inputs['scans'])
 
         year, month, day = int(case[:4]), int(case[4:6]), int(case[6:])
@@ -1337,12 +1342,12 @@ class MatchRHIsToStorms(Rule):
         da = loader.curr_da.load()
 
         dirpath = conf.PATHS['datadir'] / f'upflo_wp1_output/simple_track/{year}/{month:02d}/{day:02d}/'
-        path = list(dirpath.glob('storm_labels_*.nc'))[0]
+        path = list(dirpath.glob(f'storm_labels_*.precip_thresh_{tracking_precip_thresh}.nc'))[0]
         ds_storms = xr.load_dataset(path)
         ds_storms['rain'] = da
         print(ds_storms)
 
-        path = list(dirpath.glob('storm_data_*.hdf'))[0]
+        path = list(dirpath.glob(f'storm_data_*.precip_thresh_{tracking_precip_thresh}.hdf'))[0]
         df_storms = pd.read_hdf(path, key='storm_data')
         ds_storms['rain'] = da
 
