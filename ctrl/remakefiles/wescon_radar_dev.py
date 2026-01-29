@@ -22,6 +22,8 @@ import xarray as xr
 from loguru import logger
 from matplotlib import patches
 from scipy.signal import find_peaks
+import scipy.stats as spstats
+import seaborn as sns
 
 import proj_config as conf
 from remake import Remake, Rule
@@ -1279,7 +1281,7 @@ class MatchRHIsToStorms(Rule):
     @staticmethod
     def rule_run(inputs, outputs, case, tracking_precip_thresh):
         outdir = outputs['match_rhi_storm_stats'].parent
-        df_stats, df_scans, df_storms, ds_storms  = MatchRHIsToStorms.load_data(case, inputs, tracking_precip_thresh)
+        df_stats, df_scans, df_storms, ds_storms = MatchRHIsToStorms.load_data(case, inputs, tracking_precip_thresh)
 
         df_data = []
 
@@ -1399,3 +1401,93 @@ class MatchRHIsToStorms(Rule):
         plt.savefig(outdir / f'rhi_storm_match.{i}.{scan_idx}.png')
         plt.close('all')
 
+
+class AnalyseMatchRHIsToStorms(Rule):
+    rule_matrix = {
+        'case': conf.CASES,
+        'tracking_precip_thresh': [1., 3., 5.],
+    }
+
+    @staticmethod
+    def rule_inputs(case, tracking_precip_thresh):
+        inputs = FindCandidateDeltaZ.rule_outputs(case)
+        inputs.update(GatherDeltaZStats.rule_outputs(case))
+        inputs.update(MatchRHIsToStorms.rule_outputs(case, tracking_precip_thresh))
+        return inputs
+
+    @staticmethod
+    def rule_outputs(case, tracking_precip_thresh):
+        outdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
+        return {'analyse_match_rhi_storm_stats': (outdir / 'rhi_storm_match' /
+                                                  f'tracking_precip_thresh_{tracking_precip_thresh}' /
+                                                  'analyse_match_rhis_storm_stats.hdf')}
+
+    @staticmethod
+    def rule_run(inputs, outputs, case, tracking_precip_thresh):
+        # TODO: there are a lot of dfs now. I need to be clearer about naming them.
+        df_stats, df_scans, df_storms, ds_storms = MatchRHIsToStorms.load_data(case, inputs, tracking_precip_thresh)
+        df_matches = pd.read_hdf(inputs['match_rhi_storm_stats'], key='rhi_storm_stats')
+        analysis_stats = []
+        for i in range(len(df_matches)):
+            print(f'{i + 1}/{len(df_matches)}')
+            match = df_matches.iloc[i]
+            row_stats = df_stats.loc[match.df_stats_idx]
+            # This is *all* the rows for the given storm.
+            df_storm = df_storms[df_storms.storm_idx == match.storm_idx1]
+            row_mask = df_storm.time == match.storm_time
+            if match.rhi_time > match.storm_time:
+                df_storms_either_side = df_storm[row_mask | row_mask.shift(1)].copy()
+            else:
+                df_storms_either_side = df_storm[row_mask | row_mask.shift(-1)].copy()
+
+            if len(df_storms_either_side) != 2:
+                # This can happen if the storm is at the beginning/end of its life.
+                logger.debug('only one storm cloud found')
+                continue
+                
+            row_delta = df_storms_either_side[['time', 'area', 'extreme', 'meanfield']].diff().iloc[-1]
+            dt = row_delta.time.seconds
+            analysis_stats.append({
+                'match_idx': i,
+                'dt': dt,
+                'darea_dt': row_delta.area / dt,
+                'dextreme_precip_dt': row_delta.extreme / dt,
+                'dmean_precip_dt': row_delta.meanfield / dt,
+                'deltaZ_mean': row_stats.deltaZ_mean,
+                'deltaZ_absmean': row_stats.deltaZ_absmean,
+                'deltaZ_posmean': row_stats.deltaZ_posmean,
+            })
+
+        df_analysis = pd.DataFrame(analysis_stats)
+        figdir = outputs['analyse_match_rhi_storm_stats'].parent
+        cols = df_analysis.columns.tolist()[2:]
+
+        def annotate_fit_with_line(x, y, **kws):
+            # 1. clean data
+            mask = x.notna() & y.notna()
+            x_clean, y_clean = x[mask], y[mask]
+
+            if len(x_clean) > 1:
+                # 2. Calculate linear regression
+                slope, intercept, r, p, stderr = spstats.linregress(x_clean, y_clean)
+
+                # 3. Get current axis
+                ax = plt.gca()
+
+                # 4. Manually plot the regression line
+                # We create two points at the min and max of x to draw the line
+                x_vals = np.array([x_clean.min(), x_clean.max()])
+                y_vals = intercept + slope * x_vals
+                ax.plot(x_vals, y_vals, 'r--', lw=2)  # Red dashed line
+
+                # 5. Annotate text
+                msg = f'$R^2$={r ** 2:.2f}\n$p$={p:.2g}'
+                ax.text(0.05, 0.9, msg, transform=ax.transAxes,
+                        fontsize=10, verticalalignment='top',
+                        bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="none", alpha=0.5))
+
+        g = sns.pairplot(df_analysis[cols], diag_kind='kde', corner=True)
+        g.map_lower(annotate_fit_with_line)
+        plt.savefig(figdir / 'analysis_match_rhi_storm_stats.corr.png')
+
+        df_analysis.to_hdf(outputs['analyse_match_rhi_storm_stats'], key='analyse_match_rhi_storm_stats')

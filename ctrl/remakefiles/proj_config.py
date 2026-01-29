@@ -15,7 +15,9 @@ DATADIR = PATHS['datadir']
 SIMDIR = DATADIR / 'UM_sims'
 N_ENS_MEM = 10
 
-CASES = ['20230803', '20230815']
+# TODO: More cases.
+# CASES = ['20230803', '20230815']
+CASES = ['20230803']
 KASBEX_CASES = [
     # No matches for these - investigate.
     '20250819',
