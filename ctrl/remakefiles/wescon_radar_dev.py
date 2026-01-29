@@ -1308,6 +1308,9 @@ class MatchRHIsToStorms(Rule):
 
                 unique_storm_labels = np.unique(transect_labels.values)
                 unique_storm_labels = unique_storm_labels[unique_storm_labels != 0]
+
+                precip_along_beam = ds_storms.rain.sel(time=time, method='nearest').interp(eastings=transect_x, northings=transect_y, method='linear')
+                mean_precip_along_beam = precip_along_beam.mean().values.item()
                 def storm_label_to_idx(df, time, label):
                     storm_row = df[(df.time == time) & (df.storm_label_idx.values == label)]
                     assert len(storm_row) == 1
@@ -1318,6 +1321,7 @@ class MatchRHIsToStorms(Rule):
                     'scan_idx': scan_idx,
                     'rhi_time': time,
                     'storm_time': storm_time,
+                    'mean_precip_along_beam': mean_precip_along_beam,
                     'nstorms': len(unique_storm_labels),
                     **{f'storm_label{j + 1}': int(unique_storm_labels[j]) for j in range(len(unique_storm_labels))},
                     **{f'storm_idx{j + 1}': storm_label_to_idx(df_storms, storm_time, unique_storm_labels[j])
@@ -1325,8 +1329,8 @@ class MatchRHIsToStorms(Rule):
                 })
                 print(df_data[-1])
 
-                MatchRHIsToStorms.plot_rhi_storm_intersections(ds_storms.rain, ds_sub, i, figdir, scan_idx, storm_labels, time,
-                                                               transect_x, transect_y, unique_storm_labels, xmax, xmin)
+                # MatchRHIsToStorms.plot_rhi_storm_intersections(ds_storms.rain, ds_sub, i, figdir, scan_idx, storm_labels, time,
+                #                                                transect_x, transect_y, unique_storm_labels, xmax, xmin)
         df_rhi_storm_stats = pd.DataFrame(df_data)
         print(df_rhi_storm_stats)
         df_rhi_storm_stats.to_hdf(outputs['match_rhi_storm_stats'], key='match_rhi_storm_stats')
@@ -1424,11 +1428,14 @@ class AnalyseMatchRHIsToStorms(Rule):
     @staticmethod
     def rule_run(inputs, outputs, case, tracking_precip_thresh):
         df_candidate_scans, df_dZ_stats, df_storms, ds_storms = MatchRHIsToStorms.load_data(case, inputs, tracking_precip_thresh)
-        df_rhi_storm_matches = pd.read_hdf(inputs['match_rhi_storm_stats'], key='match_rhi_storm_stats')
+        df_rhi_storm_stats = pd.read_hdf(inputs['match_rhi_storm_stats'], key='match_rhi_storm_stats')
         analysis_stats = []
-        for i in range(len(df_rhi_storm_matches)):
-            print(f'{i + 1}/{len(df_rhi_storm_matches)}')
-            match = df_rhi_storm_matches.iloc[i]
+        for i in range(0, len(df_rhi_storm_stats), 2):
+            print(f'{i + 1}/{len(df_rhi_storm_stats)}')
+            match = df_rhi_storm_stats.iloc[i]
+            # Note, df_rhi_storm_stats contains info for the first and second composite RHI in each dZ candidate.
+            # Only calc stats for the first, and use the second to calc only the change in along-beam precip.
+            match2 = df_rhi_storm_stats.iloc[i + 1]
             row_stats = df_dZ_stats.loc[match.dZ_stats_idx]
             # This is *all* the rows for the given storm.
             df_storm = df_storms[df_storms.storm_idx == match.storm_idx1]
@@ -1448,9 +1455,11 @@ class AnalyseMatchRHIsToStorms(Rule):
             analysis_stats.append({
                 'match_idx': i,
                 'dt': dt,
+                # Correlation plot will be done on everything past here.
                 'darea_dt': row_delta.area / dt,
                 'dextreme_precip_dt': row_delta.extreme / dt,
                 'dmean_precip_dt': row_delta.meanfield / dt,
+                'delta_precip_along_beam': (match2.mean_precip_along_beam - match.mean_precip_along_beam) / dt,
                 'deltaZ_mean': row_stats.deltaZ_mean,
                 'deltaZ_absmean': row_stats.deltaZ_absmean,
                 'deltaZ_posmean': row_stats.deltaZ_posmean,
