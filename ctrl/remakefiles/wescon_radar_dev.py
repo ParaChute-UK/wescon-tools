@@ -2,9 +2,11 @@
 
 Handles CAMRa and Kepler radar data, located at Chilbolton and Lyneham respectively.
 
+**IMPORTANT** the dependency handling is not perfect between different rules. You might have to run multiple times.
+
 * Regrids data from polar to cartesian coords.
 * Finds matches (close in time) scans between CAMRa/Kepler and calcs intersects.
-* Groups all scans into *brackets*, a group of 4 scans separated by a small azimuth.
+* Groups all scans into *brackets*, a group of 4 scans separated by a small azimuth. (candidate_scans)
 * For each bracket of scans, works out if it is a *deltaZ candidate* - i.e. whether we can use the deltaZ method on it.
 * For each deltaZ candidate, generate a useful series of plots to check whether it works.
 
@@ -62,7 +64,7 @@ class Settings:
 
 settings = Settings()
 
-output_vn = 'v6'
+output_vn = 'v7'
 
 slurm_config = {'account': 'mcs_prime', 'partition': 'standard', 'qos': 'short', 'mem': 64000}
 rmk = Remake(config=dict(slurm=slurm_config))
@@ -517,7 +519,7 @@ class FindCandidateDeltaZ(Rule):
     @staticmethod
     def rule_outputs(case):
         outdir = conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
-        return {f'scans': outdir / f'{case}_scans.hdf', f'brackets': outdir / f'{case}_brackets.hdf', }
+        return {f'candidate_scans': outdir / f'{case}_scans.hdf', f'brackets': outdir / f'dZ_candidates.hdf', }
 
     @staticmethod
     def rule_run(inputs, outputs, case):
@@ -550,7 +552,7 @@ class FindCandidateDeltaZ(Rule):
                                         (brackets.complete & brackets.complete.shift(1).fillna(False)))
         logger.debug(df)
         logger.debug(brackets)
-        df.to_hdf(outputs['scans'], key='scans')
+        df.to_hdf(outputs['candidate_scans'], key='candidate_scans')
         brackets.to_hdf(outputs['brackets'], key='brackets')
 
 
@@ -678,7 +680,7 @@ class CompareDeltaZCandidates(Rule):
     def rule_outputs(case, bracket_idx1, bracket_idx2):
         outdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
         return {
-            f'dummy': outdir / 'comparison' / f'{case}_{bracket_idx1}_{bracket_idx2}' / f'compare_deltaZ_{case}_{bracket_idx1}_{bracket_idx2}.dummy.out', }
+            f'dZ_stats': outdir / 'comparison' / f'{case}_{bracket_idx1}_{bracket_idx2}' / f'dZ_stats.hdf', }
 
     @staticmethod
     def rule_run(inputs, outputs, case, bracket_idx1, bracket_idx2):
@@ -686,7 +688,7 @@ class CompareDeltaZCandidates(Rule):
         ds1, ds2 = CompareDeltaZCandidates.load_data(bracket_idx1, bracket_idx2, inputs)
         new_beam_idxs, perp_offsets = CompareDeltaZCandidates.find_all_beam_alignment(ds1, ds2)
 
-        stats = []
+        dZ_stats = []
         for perp_offset in set(perp_offsets.values()):
             s1, s2 = sliding_offset_to_slices(perp_offset)
             beam_idx1 = tuple(np.arange(4)[s1])
@@ -739,21 +741,17 @@ class CompareDeltaZCandidates(Rule):
                         'o2_cloud_max_z': get_obj_field(objs2, cl2, 'cloud_max_z'), 'deltaZ_mean': np.nanmean(deltaZ),
                         'deltaZ_absmean': np.nanmean(np.abs(deltaZ)), 'deltaZ_posmean': np.nanmean(deltaZ[deltaZ > 0]),
                         'figname': str(figname), }
-                    stats.append(stats_entry)
+                    dZ_stats.append(stats_entry)
 
-        if stats:
-            df = pd.DataFrame(stats)
-            stats_file = outputs['dummy'].parent / 'stats.hdf'
-            df.to_hdf(stats_file, key='stats')
-
-        outputs['dummy'].touch()
+        df_dZ_stats = pd.DataFrame(dZ_stats)
+        df_dZ_stats.to_hdf(outputs['dZ_stats'], key='dZ_stats')
 
     @staticmethod
     def load_data(bracket_idx1, bracket_idx2, inputs):
-        scans = pd.read_hdf(inputs['scans'], key='scans')
+        df_candidate_scans = pd.read_hdf(inputs['candidate_scans'], key='candidate_scans')
 
-        b1paths = scans[scans.bracket == bracket_idx1]['path'].values
-        b2paths = scans[scans.bracket == bracket_idx2]['path'].values
+        b1paths = df_candidate_scans[df_candidate_scans.bracket == bracket_idx1]['path'].values
+        b2paths = df_candidate_scans[df_candidate_scans.bracket == bracket_idx2]['path'].values
         assert len(b1paths) == len(b2paths) == compare_settings.num_scans_per_bracket
         ds1 = xr.open_mfdataset(b1paths)
         ds2 = xr.open_mfdataset(b2paths)
@@ -997,7 +995,7 @@ class CompareDeltaZCandidates(Rule):
                  f'{offset=}.{optimal=}.{aligned=}.'
                  f'a1={beam_idx1}.a2={beam_idx2}.png'.replace(' ', ''))
         logger.debug(fname)
-        figdir = outputs['dummy'].parent
+        figdir = outputs['dZ_stats'].parent
         plt.savefig(figdir / fname)
         return figdir / fname
 
@@ -1012,7 +1010,7 @@ class CompareDeltaZCandidates(Rule):
         # Construct a unique comparison ID string for this specific output
         comparison_id_str = f"cl{cl1}_cl{cl2}_offset{offset}"
 
-        output_path = outputs['dummy'].parent / f"deltaZ_comparison.cl{cl1}_cl{cl2}.{offset=}.{optimal=}.{aligned=}.nc"
+        output_path = outputs['dZ_stats'].parent / f"deltaZ_comparison.cl{cl1}_cl{cl2}.{offset=}.{optimal=}.{aligned=}.nc"
 
         ds_out = xr.Dataset(coords=dict(comparison_id=[comparison_id_str],  # Use the unique string as coordinate value
             x=ds1_sub.x, z=ds1_sub.z, cc_len=np.arange(len(cc_result.ccidx)),
@@ -1241,21 +1239,22 @@ class GatherDeltaZStats(Rule):
         for testcase, bracket_idx1, bracket_idx2 in matrix['case', 'bracket_idx1', 'bracket_idx2']:
             if testcase != case:
                 continue
-            dz_outputs = CompareDeltaZCandidates.rule_outputs(case, bracket_idx1, bracket_idx2)['dummy']
+            dz_outputs = CompareDeltaZCandidates.rule_outputs(case, bracket_idx1, bracket_idx2)['dZ_stats']
             inputs[str(dz_outputs)] = dz_outputs
         return inputs
 
     @staticmethod
     def rule_outputs(case):
         outdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
-        return {'gathered_stats': outdir / 'comparison' / 'gathered_stats.hdf'}
+        return {'gathered_dZ_stats': outdir / 'comparison' / 'gathered_dZ_stats.hdf'}
 
     @staticmethod
     def rule_run(inputs, outputs, case):
-        outfile = outputs['gathered_stats']
-        stats_hdfs = sorted(outfile.parent.glob('*/stats.hdf'))
+        outfile = outputs['gathered_dZ_stats']
+        stats_hdfs = list(inputs.values())
         df = pd.concat([pd.read_hdf(h) for h in stats_hdfs], ignore_index=True)
-        df.to_hdf(outfile, key='gathered_stats')
+        print(df)
+        df.to_hdf(outfile, key='gathered_dZ_stats')
 
 
 class MatchRHIsToStorms(Rule):
@@ -1276,23 +1275,23 @@ class MatchRHIsToStorms(Rule):
         outdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
         return {'match_rhi_storm_stats': (outdir / 'rhi_storm_match' /
                                           f'tracking_precip_thresh_{tracking_precip_thresh}' /
-                                          'match_rhis_storm_stats.hdf')}
+                                          'match_rhi_storm_stats.hdf')}
 
     @staticmethod
     def rule_run(inputs, outputs, case, tracking_precip_thresh):
-        outdir = outputs['match_rhi_storm_stats'].parent
-        df_stats, df_scans, df_storms, ds_storms = MatchRHIsToStorms.load_data(case, inputs, tracking_precip_thresh)
+        figdir = outputs['match_rhi_storm_stats'].parent
+        df_candidate_scans, df_dZ_stats, df_storms, ds_storms = MatchRHIsToStorms.load_data(case, inputs, tracking_precip_thresh)
 
         df_data = []
 
-        for i in range(len(df_stats)):
-            # logger.info(f'{i + 1}/{len(df_stats)}')
+        for i in range(len(df_dZ_stats)):
+            # logger.info(f'{i + 1}/{len(df_dZ_stats)}')
             # fields available can be seen in stats_entry
-            row = df_stats.iloc[i]
+            row = df_dZ_stats.iloc[i]
             xmin = row.xmin
             xmax = row.xmax
 
-            ds_sub = MatchRHIsToStorms.load_rhis(df_scans, row, xmin, xmax)
+            ds_sub = MatchRHIsToStorms.load_rhis(df_candidate_scans, row, xmin, xmax)
             transect_dist = np.arange(xmin, xmax) * 1e3  # km to m.
 
             for scan_idx in [1, 2]:
@@ -1315,7 +1314,7 @@ class MatchRHIsToStorms(Rule):
                     return int(storm_row.iloc[0].storm_idx)
 
                 df_data.append({
-                    'df_stats_idx': row.name,
+                    'dZ_stats_idx': row.name,
                     'scan_idx': scan_idx,
                     'rhi_time': time,
                     'storm_time': storm_time,
@@ -1326,15 +1325,15 @@ class MatchRHIsToStorms(Rule):
                 })
                 print(df_data[-1])
 
-                # MatchRHIsToStorms.plot_rhi_storm_intersections(ds_storms.rain, ds_sub, i, outdir, scan_idx, storm_labels, time,
-                #                                                transect_x, transect_y, unique_storm_labels, xmax, xmin)
+                MatchRHIsToStorms.plot_rhi_storm_intersections(ds_storms.rain, ds_sub, i, figdir, scan_idx, storm_labels, time,
+                                                               transect_x, transect_y, unique_storm_labels, xmax, xmin)
         df_rhi_storm_stats = pd.DataFrame(df_data)
         print(df_rhi_storm_stats)
-        df_rhi_storm_stats.to_hdf(outputs['match_rhi_storm_stats'], key='rhi_storm_stats')
+        df_rhi_storm_stats.to_hdf(outputs['match_rhi_storm_stats'], key='match_rhi_storm_stats')
 
     @staticmethod
     def load_data(case, inputs, tracking_precip_thresh):
-        df_scans = pd.read_hdf(inputs['scans'])
+        df_candidate_scans = pd.read_hdf(inputs['candidate_scans'])
 
         year, month, day = int(case[:4]), int(case[4:6]), int(case[6:])
         datadir = conf.PATHS['datadir'] / f'radarnet/{year}/{month:02d}/{day:02d}'
@@ -1353,15 +1352,15 @@ class MatchRHIsToStorms(Rule):
         df_storms = pd.read_hdf(path, key='storm_data')
         ds_storms['rain'] = da
 
-        df = pd.read_hdf(inputs['gathered_stats'], key='gathered_stats')
+        df = pd.read_hdf(inputs['gathered_dZ_stats'], key='gathered_dZ_stats')
         # Only keep optimal along beam and aligned across beam.
-        df_stats = df[df.optimal_parallel_offset & df.aligned_perp_offset]
-        return df_stats, df_scans, df_storms, ds_storms
+        df_dZ_stats = df[df.optimal_parallel_offset & df.aligned_perp_offset]
+        return df_candidate_scans, df_dZ_stats, df_storms, ds_storms
 
     @staticmethod
-    def load_rhis(scans, row, xmin, xmax):
-        b1paths = scans[scans.bracket == row.bracket_idx1]['path'].values
-        b2paths = scans[scans.bracket == row.bracket_idx2]['path'].values
+    def load_rhis(df_candidate_scans, row, xmin, xmax):
+        b1paths = df_candidate_scans[df_candidate_scans.bracket == row.bracket_idx1]['path'].values
+        b2paths = df_candidate_scans[df_candidate_scans.bracket == row.bracket_idx2]['path'].values
         perp_offset = row.perp_offset
         s1, s2 = sliding_offset_to_slices(perp_offset)
         ds_sub = {
@@ -1371,7 +1370,7 @@ class MatchRHIsToStorms(Rule):
         return ds_sub
 
     @staticmethod
-    def plot_rhi_storm_intersections(da, ds_sub, i, outdir, scan_idx, storm_labels, time, transect_x, transect_y,
+    def plot_rhi_storm_intersections(da, ds_sub, i, figdir, scan_idx, storm_labels, time, transect_x, transect_y,
                                      unique_storm_labels, xmax, xmin):
         fig = plt.figure(layout='constrained', figsize=(16, 12))
         gs = gridspec.GridSpec(ncols=2, nrows=1, figure=fig)
@@ -1398,7 +1397,7 @@ class MatchRHIsToStorms(Rule):
         ax1.plot(transect_x, transect_y)
 
         ax2.pcolormesh(ds_sub[scan_idx].x, ds_sub[scan_idx].z, ds_sub[scan_idx].rhi_Z, vmin=-10, vmax=60)
-        plt.savefig(outdir / f'rhi_storm_match.{i}.{scan_idx}.png')
+        plt.savefig(figdir / f'rhi_storm_match.{i}.{scan_idx}.png')
         plt.close('all')
 
 
@@ -1420,18 +1419,17 @@ class AnalyseMatchRHIsToStorms(Rule):
         outdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
         return {'analyse_match_rhi_storm_stats': (outdir / 'rhi_storm_match' /
                                                   f'tracking_precip_thresh_{tracking_precip_thresh}' /
-                                                  'analyse_match_rhis_storm_stats.hdf')}
+                                                  'analyse_match_rhi_storm_stats.hdf')}
 
     @staticmethod
     def rule_run(inputs, outputs, case, tracking_precip_thresh):
-        # TODO: there are a lot of dfs now. I need to be clearer about naming them.
-        df_stats, df_scans, df_storms, ds_storms = MatchRHIsToStorms.load_data(case, inputs, tracking_precip_thresh)
-        df_matches = pd.read_hdf(inputs['match_rhi_storm_stats'], key='rhi_storm_stats')
+        df_candidate_scans, df_dZ_stats, df_storms, ds_storms = MatchRHIsToStorms.load_data(case, inputs, tracking_precip_thresh)
+        df_rhi_storm_matches = pd.read_hdf(inputs['match_rhi_storm_stats'], key='match_rhi_storm_stats')
         analysis_stats = []
-        for i in range(len(df_matches)):
-            print(f'{i + 1}/{len(df_matches)}')
-            match = df_matches.iloc[i]
-            row_stats = df_stats.loc[match.df_stats_idx]
+        for i in range(len(df_rhi_storm_matches)):
+            print(f'{i + 1}/{len(df_rhi_storm_matches)}')
+            match = df_rhi_storm_matches.iloc[i]
+            row_stats = df_dZ_stats.loc[match.dZ_stats_idx]
             # This is *all* the rows for the given storm.
             df_storm = df_storms[df_storms.storm_idx == match.storm_idx1]
             row_mask = df_storm.time == match.storm_time
@@ -1458,9 +1456,9 @@ class AnalyseMatchRHIsToStorms(Rule):
                 'deltaZ_posmean': row_stats.deltaZ_posmean,
             })
 
-        df_analysis = pd.DataFrame(analysis_stats)
+        df_analysis_matches = pd.DataFrame(analysis_stats)
         figdir = outputs['analyse_match_rhi_storm_stats'].parent
-        cols = df_analysis.columns.tolist()[2:]
+        cols = df_analysis_matches.columns.tolist()[2:]
 
         def annotate_fit_with_line(x, y, **kws):
             # 1. clean data
@@ -1486,8 +1484,8 @@ class AnalyseMatchRHIsToStorms(Rule):
                         fontsize=10, verticalalignment='top',
                         bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="none", alpha=0.5))
 
-        g = sns.pairplot(df_analysis[cols], diag_kind='kde', corner=True)
+        g = sns.pairplot(df_analysis_matches[cols], diag_kind='kde', corner=True)
         g.map_lower(annotate_fit_with_line)
         plt.savefig(figdir / 'analysis_match_rhi_storm_stats.corr.png')
 
-        df_analysis.to_hdf(outputs['analyse_match_rhi_storm_stats'], key='analyse_match_rhi_storm_stats')
+        df_analysis_matches.to_hdf(outputs['analyse_match_rhi_storm_stats'], key='analyse_match_rhi_storm_stats')
