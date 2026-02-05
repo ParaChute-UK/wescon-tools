@@ -66,7 +66,7 @@ settings = Settings()
 
 output_vn = 'v7'
 
-slurm_config = {'account': 'mcs_prime', 'partition': 'standard', 'qos': 'short', 'mem': 64000}
+slurm_config = {'account': 'mcs_prime', 'partition': 'standard', 'qos': 'short', 'mem': 64000, 'exclude': 'host1117'}
 rmk = Remake(config=dict(slurm=slurm_config))
 
 
@@ -726,6 +726,8 @@ class CompareDeltaZCandidates(Rule):
                         return objs.isel(time=0).sel(reflectivity_thresh=10)[field].values[obj_cloud_idx]
 
                     deltaZ = np.roll(ds2_sub.rhi_Z.values, int(corr_parallel_offset), axis=1) - ds1_sub.rhi_Z.values
+                    deltaZ_20dBZ = deltaZ[ds1_sub.rhi_Z > 20]
+
                     az_mean1 = ds1_comp.rhi_mean_az.values.mean()
                     az_mean2 = ds2_comp.rhi_mean_az.values.mean()
                     # TODO: save info on winds for easy reference.
@@ -738,8 +740,13 @@ class CompareDeltaZCandidates(Rule):
                         'perp_offset': perp_offset, 'parallel_offset': corr_parallel_offset,
                         'optimal_parallel_offset': optimal, 'aligned_perp_offset': aligned,
                         'o1_cloud_max_z': get_obj_field(objs1, cl1, 'cloud_max_z'),
-                        'o2_cloud_max_z': get_obj_field(objs2, cl2, 'cloud_max_z'), 'deltaZ_mean': np.nanmean(deltaZ),
-                        'deltaZ_absmean': np.nanmean(np.abs(deltaZ)), 'deltaZ_posmean': np.nanmean(deltaZ[deltaZ > 0]),
+                        'o2_cloud_max_z': get_obj_field(objs2, cl2, 'cloud_max_z'),
+                        'deltaZ_mean': np.nanmean(deltaZ),
+                        'deltaZ_absmean': np.nanmean(np.abs(deltaZ)),
+                        'deltaZ_posmean': np.nanmean(deltaZ[deltaZ > 0]),
+                        'deltaZ_mean_20dBZ': np.nanmean(deltaZ_20dBZ),
+                        'deltaZ_absmean_20dBZ': np.nanmean(np.abs(deltaZ_20dBZ)),
+                        'deltaZ_posmean_20dBZ': np.nanmean(deltaZ_20dBZ[deltaZ_20dBZ > 0]),
                         'figname': str(figname), }
                     dZ_stats.append(stats_entry)
 
@@ -1262,25 +1269,30 @@ class MatchRHIsToStorms(Rule):
     rule_matrix = {
         'case': conf.CASES,
         'tracking_precip_thresh': [1., 3., 5.],
+        'dZ_stats_filters': ['all_cloud', 'high_cloud']
     }
 
     @staticmethod
-    def rule_inputs(case, tracking_precip_thresh):
+    def rule_inputs(case, tracking_precip_thresh, dZ_stats_filters):
         inputs = FindCandidateDeltaZ.rule_outputs(case)
         inputs.update(GatherDeltaZStats.rule_outputs(case))
         return inputs
 
     @staticmethod
-    def rule_outputs(case, tracking_precip_thresh):
+    def rule_outputs(case, tracking_precip_thresh, dZ_stats_filters):
         outdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
         return {'match_rhi_storm_stats': (outdir / 'rhi_storm_match' /
                                           f'tracking_precip_thresh_{tracking_precip_thresh}' /
-                                          'match_rhi_storm_stats.hdf')}
+                                          f'match_rhi_storm_stats.{dZ_stats_filters}.hdf')}
 
     @staticmethod
-    def rule_run(inputs, outputs, case, tracking_precip_thresh):
+    def rule_run(inputs, outputs, case, tracking_precip_thresh, dZ_stats_filters):
         figdir = outputs['match_rhi_storm_stats'].parent
         df_candidate_scans, df_dZ_stats, df_storms, ds_storms = MatchRHIsToStorms.load_data(case, inputs, tracking_precip_thresh)
+        if dZ_stats_filters == 'all_cloud':
+            pass
+        elif dZ_stats_filters == 'high_cloud':
+            df_dZ_stats = df_dZ_stats[df_dZ_stats.o1_cloud_max_z > 4]
 
         df_data = []
 
@@ -1409,24 +1421,25 @@ class AnalyseMatchRHIsToStorms(Rule):
     rule_matrix = {
         'case': conf.CASES,
         'tracking_precip_thresh': [1., 3., 5.],
+        'dZ_stats_filters': ['all_cloud', 'high_cloud']
     }
 
     @staticmethod
-    def rule_inputs(case, tracking_precip_thresh):
+    def rule_inputs(case, tracking_precip_thresh, dZ_stats_filters):
         inputs = FindCandidateDeltaZ.rule_outputs(case)
         inputs.update(GatherDeltaZStats.rule_outputs(case))
-        inputs.update(MatchRHIsToStorms.rule_outputs(case, tracking_precip_thresh))
+        inputs.update(MatchRHIsToStorms.rule_outputs(case, tracking_precip_thresh, dZ_stats_filters))
         return inputs
 
     @staticmethod
-    def rule_outputs(case, tracking_precip_thresh):
+    def rule_outputs(case, tracking_precip_thresh, dZ_stats_filters):
         outdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
         return {'analyse_match_rhi_storm_stats': (outdir / 'rhi_storm_match' /
                                                   f'tracking_precip_thresh_{tracking_precip_thresh}' /
-                                                  'analyse_match_rhi_storm_stats.hdf')}
+                                                  f'analyse_match_rhi_storm_stats.{dZ_stats_filters}.hdf')}
 
     @staticmethod
-    def rule_run(inputs, outputs, case, tracking_precip_thresh):
+    def rule_run(inputs, outputs, case, tracking_precip_thresh, dZ_stats_filters):
         df_candidate_scans, df_dZ_stats, df_storms, ds_storms = MatchRHIsToStorms.load_data(case, inputs, tracking_precip_thresh)
         df_rhi_storm_stats = pd.read_hdf(inputs['match_rhi_storm_stats'], key='match_rhi_storm_stats')
         analysis_stats = []
@@ -1459,10 +1472,14 @@ class AnalyseMatchRHIsToStorms(Rule):
                 'darea_dt': row_delta.area / dt,
                 'dextreme_precip_dt': row_delta.extreme / dt,
                 'dmean_precip_dt': row_delta.meanfield / dt,
+                'mean_precip_along_beam': (match.mean_precip_along_beam + match2.mean_precip_along_beam) / 2,
                 'delta_precip_along_beam': (match2.mean_precip_along_beam - match.mean_precip_along_beam) / dt,
                 'deltaZ_mean': row_stats.deltaZ_mean,
                 'deltaZ_absmean': row_stats.deltaZ_absmean,
                 'deltaZ_posmean': row_stats.deltaZ_posmean,
+                'deltaZ_mean_20dBZ': row_stats.deltaZ_mean_20dBZ,
+                'deltaZ_absmean_20dBZ': row_stats.deltaZ_absmean_20dBZ,
+                'deltaZ_posmean_20dBZ': row_stats.deltaZ_posmean_20dBZ,
             })
 
         df_analysis_matches = pd.DataFrame(analysis_stats)
@@ -1495,6 +1512,8 @@ class AnalyseMatchRHIsToStorms(Rule):
 
         g = sns.pairplot(df_analysis_matches[cols], diag_kind='kde', corner=True)
         g.map_lower(annotate_fit_with_line)
-        plt.savefig(figdir / 'analysis_match_rhi_storm_stats.corr.png')
+        figpath = figdir / f'analysis_match_rhi_storm_stats.corr.{dZ_stats_filters}.png'
+        logger.info(f'saving to {figpath}')
+        plt.savefig(figpath)
 
         df_analysis_matches.to_hdf(outputs['analyse_match_rhi_storm_stats'], key='analyse_match_rhi_storm_stats')
