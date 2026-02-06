@@ -1484,7 +1484,10 @@ class AnalyseMatchRHIsToStorms(Rule):
 
         df_analysis_matches = pd.DataFrame(analysis_stats)
         figdir = outputs['analyse_match_rhi_storm_stats'].parent
+        # Skip match_idx and dt.
         cols = df_analysis_matches.columns.tolist()[2:]
+        xcols = [c for c in cols if not c.startswith('deltaZ')]
+        ycols = [c for c in cols if c.startswith('deltaZ')]
 
         def annotate_fit_with_line(x, y, **kws):
             # 1. clean data
@@ -1504,15 +1507,25 @@ class AnalyseMatchRHIsToStorms(Rule):
                 y_vals = intercept + slope * x_vals
                 ax.plot(x_vals, y_vals, 'r--', lw=2)  # Red dashed line
 
+                is_interesting = (r ** 2 >= 0.05) and (p <= 0.01)
+                edge_colour = "green" if is_interesting else "none"
+                face_colour = "green" if is_interesting else "white"
+                line_width = 1.5 if is_interesting else 0
+
                 # 5. Annotate text
-                msg = f'$R^2$={r ** 2:.2f}\n$p$={p:.2g}'
+                msg = f'$r^2$={r ** 2:.2f}\n$p$={p:.2g}'
                 ax.text(0.05, 0.9, msg, transform=ax.transAxes,
                         fontsize=10, verticalalignment='top',
-                        bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="none", alpha=0.5))
+                        bbox=dict(boxstyle="round,pad=0.3", fc=face_colour, ec=edge_colour, lw=line_width, alpha=0.5))
 
-        g = sns.pairplot(df_analysis_matches[cols], diag_kind='kde', corner=True)
-        g.map_lower(annotate_fit_with_line)
-        figpath = figdir / f'analysis_match_rhi_storm_stats.corr.{dZ_stats_filters}.png'
+        # If showing full set of correlations.
+        # g = sns.pairplot(df_analysis_matches[cols], x_vars=xcols, y_vars=ycols, diag_kind='kde', corner=True)
+        # g.map_lower(annotate_fit_with_line)
+        # If only showing partial set.
+        g = sns.pairplot(df_analysis_matches[cols], x_vars=xcols, y_vars=ycols, diag_kind='kde')
+        g.map(annotate_fit_with_line)
+        g.figure.suptitle(f'{case} thresh={tracking_precip_thresh} {dZ_stats_filters}', y=1.02)
+        figpath = figdir / f'analysis_match_rhi_storm_stats.corr.{case}.thresh_{tracking_precip_thresh}.{dZ_stats_filters}.png'
         logger.info(f'saving to {figpath}')
         plt.savefig(figpath)
 
