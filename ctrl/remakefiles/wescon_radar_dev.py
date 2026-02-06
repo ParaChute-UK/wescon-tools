@@ -1362,7 +1362,6 @@ class MatchRHIsToStorms(Rule):
         path = list(dirpath.glob(f'storm_labels_*.precip_thresh_{tracking_precip_thresh}.nc'))[0]
         ds_storms = xr.load_dataset(path)
         ds_storms['rain'] = da
-        print(ds_storms)
 
         path = list(dirpath.glob(f'storm_data_*.precip_thresh_{tracking_precip_thresh}.hdf'))[0]
         df_storms = pd.read_hdf(path, key='storm_data')
@@ -1416,35 +1415,124 @@ class MatchRHIsToStorms(Rule):
         plt.savefig(figdir / f'rhi_storm_match.{i}.{scan_idx}.png')
         plt.close('all')
 
+def annotate_fit_with_line(x, y, **kws):
+    # clean data
+    ax = kws.get('ax', plt.gca())
+    mask = x.notna() & y.notna()
+    x_clean, y_clean = x[mask], y[mask]
+
+    if len(x_clean) > 1:
+        # Calculate linear regression
+        slope, intercept, r, p, stderr = spstats.linregress(x_clean, y_clean)
+
+        # We create two points at the min and max of x to draw the line
+        x_vals = np.array([x_clean.min(), x_clean.max()])
+        y_vals = intercept + slope * x_vals
+        ax.plot(x_vals, y_vals, 'r--', lw=2)  # Red dashed line
+
+        is_interesting = (r ** 2 >= 0.05) and (p <= 0.01)
+        edge_colour = "green" if is_interesting else "none"
+        face_colour = "green" if is_interesting else "white"
+        line_width = 1.5 if is_interesting else 0
+
+        # 5. Annotate text
+        msg = f'$r^2$={r ** 2:.2f}\n$p$={p:.2g}'
+        ax.text(0.05, 0.9, msg, transform=ax.transAxes,
+                fontsize=10, verticalalignment='top',
+                bbox=dict(boxstyle="round,pad=0.3", fc=face_colour, ec=edge_colour, lw=line_width, alpha=0.5))
+
 
 class AnalyseMatchRHIsToStorms(Rule):
     rule_matrix = {
         'case': conf.CASES,
-        'tracking_precip_thresh': [1., 3., 5.],
-        'dZ_stats_filters': ['all_cloud', 'high_cloud']
+        # 'tracking_precip_thresh': [1., 3., 5.],
+        # 'dZ_stats_filters': ['all_cloud', 'high_cloud']
     }
 
     @staticmethod
-    def rule_inputs(case, tracking_precip_thresh, dZ_stats_filters):
+    def rule_inputs(case):
         inputs = FindCandidateDeltaZ.rule_outputs(case)
         inputs.update(GatherDeltaZStats.rule_outputs(case))
-        inputs.update(MatchRHIsToStorms.rule_outputs(case, tracking_precip_thresh, dZ_stats_filters))
+        for tracking_precip_thresh, dZ_stats_filters in product([1., 3., 5.], ['all_cloud', 'high_cloud']):
+            key2 = f'_{tracking_precip_thresh}_{dZ_stats_filters}'
+            match_output = MatchRHIsToStorms.rule_outputs(case, tracking_precip_thresh, dZ_stats_filters)
+            inputs.update({k + key2: v for k, v in match_output.items()})
         return inputs
 
     @staticmethod
-    def rule_outputs(case, tracking_precip_thresh, dZ_stats_filters):
+    def rule_outputs(case):
         outdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
         return {'analyse_match_rhi_storm_stats': (outdir / 'rhi_storm_match' /
-                                                  f'tracking_precip_thresh_{tracking_precip_thresh}' /
-                                                  f'analyse_match_rhi_storm_stats.{dZ_stats_filters}.hdf')}
+                                                  f'tracking_precip_thresh' /
+                                                  f'analyse_match_rhi_storm_stats.hdf')}
 
     @staticmethod
-    def rule_run(inputs, outputs, case, tracking_precip_thresh, dZ_stats_filters):
-        df_candidate_scans, df_dZ_stats, df_storms, ds_storms = MatchRHIsToStorms.load_data(case, inputs, tracking_precip_thresh)
-        df_rhi_storm_stats = pd.read_hdf(inputs['match_rhi_storm_stats'], key='match_rhi_storm_stats')
+    def rule_run(inputs, outputs, case):
         analysis_stats = []
+        for tracking_precip_thresh in [1., 3., 5.]:
+            df_candidate_scans, df_dZ_stats, df_storms, ds_storms = MatchRHIsToStorms.load_data(case, inputs,
+                                                                                                tracking_precip_thresh)
+            for dZ_stats_filters in ['all_cloud', 'high_cloud']:
+                key = f'{tracking_precip_thresh}_{dZ_stats_filters}'
+                logger.info(key)
+
+                df_rhi_storm_stats = pd.read_hdf(inputs['match_rhi_storm_stats_' + key], key='match_rhi_storm_stats')
+
+                AnalyseMatchRHIsToStorms.append_analysis_stats(key, df_dZ_stats, df_rhi_storm_stats, df_storms,
+                                                               analysis_stats)
+
+        df_analysis_matches_full = pd.DataFrame(analysis_stats)
+
+        for tracking_precip_thresh, dZ_stats_filters in product([1., 3., 5.], ['all_cloud', 'high_cloud']):
+            key = f'{tracking_precip_thresh}_{dZ_stats_filters}'
+            df_analysis_matches = df_analysis_matches_full[df_analysis_matches_full.settings == key]
+
+            AnalyseMatchRHIsToStorms.plot_full_corr_matrix(case, tracking_precip_thresh, dZ_stats_filters,
+                                                           df_analysis_matches, outputs)
+
+        fig, axes = plt.subplots(1, 6, figsize=(20, 4), layout='constrained')
+        for ax, (tracking_precip_thresh, dZ_stats_filters) in zip(axes, product([1., 3., 5.], ['all_cloud', 'high_cloud'])):
+            key = f'{tracking_precip_thresh}_{dZ_stats_filters}'
+            df_analysis_matches = df_analysis_matches_full[df_analysis_matches_full.settings == key]
+            ax.scatter(df_analysis_matches.area, df_analysis_matches.deltaZ_mean_20dBZ)
+            annotate_fit_with_line(df_analysis_matches.area, df_analysis_matches.deltaZ_mean_20dBZ, ax=ax)
+
+            ax.set_title(f'{dZ_stats_filters} thresh={tracking_precip_thresh}')
+            ax.set_xlabel('area')
+            if ax == axes[0]:
+                ax.set_ylabel('deltaZ_mean_20dBZ')
+
+        figdir = outputs['analyse_match_rhi_storm_stats'].parent
+        figpath = figdir / f'analysis_match_rhi_storm_stats.corr.area.deltaZ_mean_20dBZ.png'
+        logger.info(f'saving to {figpath}')
+        plt.savefig(figpath)
+
+        df_analysis_matches_full.to_hdf(outputs['analyse_match_rhi_storm_stats'], key='analyse_match_rhi_storm_stats')
+
+    @staticmethod
+    def plot_full_corr_matrix(case, tracking_precip_thresh, dZ_stats_filters, df_analysis_matches, outputs):
+        figdir = outputs['analyse_match_rhi_storm_stats'].parent
+        # Skip settings, match_idx and dt.
+        cols = df_analysis_matches.columns.tolist()[3:]
+        xcols = [c for c in cols if not c.startswith('deltaZ')]
+        ycols = [c for c in cols if c.startswith('deltaZ')]
+
+        # If showing full set of correlations.
+        # g = sns.pairplot(df_analysis_matches[cols], x_vars=xcols, y_vars=ycols, diag_kind='kde', corner=True)
+        # g.map_lower(annotate_fit_with_line)
+        # If only showing partial set.
+        g = sns.pairplot(df_analysis_matches[cols], x_vars=xcols, y_vars=ycols, diag_kind='kde')
+        g.map(annotate_fit_with_line)
+        g.figure.suptitle(f'{case} thresh={tracking_precip_thresh} {dZ_stats_filters}')
+        figpath = figdir / f'analysis_match_rhi_storm_stats.corr.{case}.thresh_{tracking_precip_thresh}.{dZ_stats_filters}.png'
+        logger.info(f'saving to {figpath}')
+        plt.savefig(figpath)
+
+    @staticmethod
+    def append_analysis_stats(key, df_dZ_stats, df_rhi_storm_stats, df_storms, analysis_stats):
         for i in range(0, len(df_rhi_storm_stats), 2):
-            print(f'{i + 1}/{len(df_rhi_storm_stats)}')
+            if i % 100 == 0:
+                logger.debug(f'{i + 1}/{len(df_rhi_storm_stats)}')
             match = df_rhi_storm_stats.iloc[i]
             # Note, df_rhi_storm_stats contains info for the first and second composite RHI in each dZ candidate.
             # Only calc stats for the first, and use the second to calc only the change in along-beam precip.
@@ -1462,13 +1550,17 @@ class AnalyseMatchRHIsToStorms(Rule):
                 # This can happen if the storm is at the beginning/end of its life.
                 logger.debug('only one storm cloud found')
                 continue
-                
+
             row_delta = df_storms_either_side[['time', 'area', 'extreme', 'meanfield']].diff().iloc[-1]
             dt = row_delta.time.seconds
             analysis_stats.append({
+                'settings': key,
                 'match_idx': i,
                 'dt': dt,
                 # Correlation plot will be done on everything past here.
+                'area': df_storms_either_side.iloc[0].area,
+                'extreme_precip': df_storms_either_side.iloc[0].extreme,
+                'mean_precip': df_storms_either_side.iloc[0].meanfield,
                 'darea_dt': row_delta.area / dt,
                 'dextreme_precip_dt': row_delta.extreme / dt,
                 'dmean_precip_dt': row_delta.meanfield / dt,
@@ -1481,52 +1573,3 @@ class AnalyseMatchRHIsToStorms(Rule):
                 'deltaZ_absmean_20dBZ': row_stats.deltaZ_absmean_20dBZ,
                 'deltaZ_posmean_20dBZ': row_stats.deltaZ_posmean_20dBZ,
             })
-
-        df_analysis_matches = pd.DataFrame(analysis_stats)
-        figdir = outputs['analyse_match_rhi_storm_stats'].parent
-        # Skip match_idx and dt.
-        cols = df_analysis_matches.columns.tolist()[2:]
-        xcols = [c for c in cols if not c.startswith('deltaZ')]
-        ycols = [c for c in cols if c.startswith('deltaZ')]
-
-        def annotate_fit_with_line(x, y, **kws):
-            # 1. clean data
-            mask = x.notna() & y.notna()
-            x_clean, y_clean = x[mask], y[mask]
-
-            if len(x_clean) > 1:
-                # 2. Calculate linear regression
-                slope, intercept, r, p, stderr = spstats.linregress(x_clean, y_clean)
-
-                # 3. Get current axis
-                ax = plt.gca()
-
-                # 4. Manually plot the regression line
-                # We create two points at the min and max of x to draw the line
-                x_vals = np.array([x_clean.min(), x_clean.max()])
-                y_vals = intercept + slope * x_vals
-                ax.plot(x_vals, y_vals, 'r--', lw=2)  # Red dashed line
-
-                is_interesting = (r ** 2 >= 0.05) and (p <= 0.01)
-                edge_colour = "green" if is_interesting else "none"
-                face_colour = "green" if is_interesting else "white"
-                line_width = 1.5 if is_interesting else 0
-
-                # 5. Annotate text
-                msg = f'$r^2$={r ** 2:.2f}\n$p$={p:.2g}'
-                ax.text(0.05, 0.9, msg, transform=ax.transAxes,
-                        fontsize=10, verticalalignment='top',
-                        bbox=dict(boxstyle="round,pad=0.3", fc=face_colour, ec=edge_colour, lw=line_width, alpha=0.5))
-
-        # If showing full set of correlations.
-        # g = sns.pairplot(df_analysis_matches[cols], x_vars=xcols, y_vars=ycols, diag_kind='kde', corner=True)
-        # g.map_lower(annotate_fit_with_line)
-        # If only showing partial set.
-        g = sns.pairplot(df_analysis_matches[cols], x_vars=xcols, y_vars=ycols, diag_kind='kde')
-        g.map(annotate_fit_with_line)
-        g.figure.suptitle(f'{case} thresh={tracking_precip_thresh} {dZ_stats_filters}', y=1.02)
-        figpath = figdir / f'analysis_match_rhi_storm_stats.corr.{case}.thresh_{tracking_precip_thresh}.{dZ_stats_filters}.png'
-        logger.info(f'saving to {figpath}')
-        plt.savefig(figpath)
-
-        df_analysis_matches.to_hdf(outputs['analyse_match_rhi_storm_stats'], key='analyse_match_rhi_storm_stats')
