@@ -1468,6 +1468,7 @@ class AnalyseMatchRHIsToStorms(Rule):
 
     @staticmethod
     def rule_run(inputs, outputs, case):
+        print(case)
         analysis_stats = []
         for tracking_precip_thresh in [1., 3., 5.]:
             df_candidate_scans, df_dZ_stats, df_storms, ds_storms = MatchRHIsToStorms.load_data(case, inputs,
@@ -1524,6 +1525,7 @@ class AnalyseMatchRHIsToStorms(Rule):
         g = sns.pairplot(df_analysis_matches[cols], x_vars=xcols, y_vars=ycols, diag_kind='kde')
         g.map(annotate_fit_with_line)
         g.figure.suptitle(f'{case} thresh={tracking_precip_thresh} {dZ_stats_filters}')
+        g.figure.subplots_adjust(top=0.96)
         figpath = figdir / f'analysis_match_rhi_storm_stats.corr.{case}.thresh_{tracking_precip_thresh}.{dZ_stats_filters}.png'
         logger.info(f'saving to {figpath}')
         plt.savefig(figpath)
