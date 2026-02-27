@@ -16,7 +16,7 @@ maintainers = [
     { name = "Mark Muetzelfeldt", email = "mark.muetzelfeldt@reading.ac.uk" },
     { name = "Brian Lo", email = "chunhaybrian.lo@reading.ac.uk" }
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = "MIT"
 license-files = ['LICENSE']
 readme = "README.md"
@@ -45,8 +45,11 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/markmuetz/wescon-tools"
 
-[tool.uv.workspace]
-members = ["wescon-tools"]
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# [tool.uv.workspace]
+# members = ["wescon-tools"]
 
 # [project.scripts]
 
