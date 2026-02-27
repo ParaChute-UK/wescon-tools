@@ -1,19 +1,17 @@
 import sys
 from pathlib import Path
 
-import cartopy.crs as ccrs
-import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import xarray as xr
-from shapely import box, Point
+from shapely import box
+from shapely.geometry import LineString
 from shapely.geometry import MultiPoint
+from shapely.geometry import Point, Polygon
 
 from wescon_tools.custom_osgb import CustomOSGB
 from wescon_tools.match_rhi_to_3d_winds import MatchRHIto3dWinds, Plot3dWinds, CHIL_X, CHIL_Y
-
-import numpy as np
-from shapely.geometry import Point, Polygon
 
 
 def create_sector(center_x, center_y, radius, start_angle, end_angle):
@@ -27,17 +25,31 @@ def create_sector(center_x, center_y, radius, start_angle, end_angle):
     # Generate points along the arc
     # Note: Math functions use radians and 0 at East (3 o'clock)
     # We convert 'North-based degrees' to 'Math-based radians'
-    t = np.linspace(np.deg2rad(90 - start_angle),
-                    np.deg2rad(90 - end_angle), 100)
+    t = np.linspace(np.deg2rad(90 - start_angle), np.deg2rad(90 - end_angle), 100)
 
-    arc_points = [(center_x + radius * np.cos(angle),
-                   center_y + radius * np.sin(angle)) for angle in t]
+    arc_points = [(center_x + radius * np.cos(angle), center_y + radius * np.sin(angle)) for angle in t]
 
     # Build the polygon: [Center] + [Points along the arc] + [Center]
     return Polygon([center] + arc_points + [center])
 
 
-def plot_3d_winds_CAMRa_domain(matcher):
+def create_line_by_angle(start_x, start_y, angle_deg, length_m=150e3):
+    """
+    Creates a LineString starting at (x, y) extending at a CW angle from North.
+    length_m: Should be large enough to span the domain (default 500km).
+    """
+    # Convert geographic heading (CW from North) to math radians (CCW from East)
+    # Math 0 rad is East (90 deg); Math pi/2 rad is North (0 deg)
+    angle_rad = np.deg2rad(90 - angle_deg)
+
+    # Calculate end point coordinates
+    end_x = start_x + length_m * np.cos(angle_rad)
+    end_y = start_y + length_m * np.sin(angle_rad)
+
+    return LineString([(start_x, start_y), (end_x, end_y)])
+
+
+def plot_3d_winds_CAMRa_domain(matcher, scan_angle=None):
     # Low-stakes, can verify it works. Pretty much vibe coded.
     proj = CustomOSGB()
     ds3d_osgb = matcher.ds3d_osgb
@@ -83,9 +95,8 @@ def plot_3d_winds_CAMRa_domain(matcher):
         print(f"Intersection: Easting={intersection_points.x:.2f}, Northing={intersection_points.y:.2f}")
 
     # 4. Optional: Plot the points as red dots
-    ax.plot([p.x for p in intersection_points.geoms],
-            [p.y for p in intersection_points.geoms],
-            'ro', transform=proj, markersize=8)
+    ax.plot([p.x for p in intersection_points.geoms], [p.y for p in intersection_points.geoms], 'ro', transform=proj,
+            markersize=8)
 
     def get_sector_angles(geoms):
         assert len(geoms) == 2
@@ -109,20 +120,26 @@ def plot_3d_winds_CAMRa_domain(matcher):
 
     ax.add_geometries([sector_geom], crs=proj, facecolor='green', alpha=0.4)
 
+    if scan_angle:
+        full_line = create_line_by_angle(CHIL_X, CHIL_Y, scan_angle, length_m=150e3)
+        clipped_line = full_line.intersection(rect_geom)
+        print(f'CAMRa/3D winds overlap: {clipped_line.length / 1e3:.2f} km')
+        ax.add_geometries([full_line], proj, edgecolor='cyan',
+                          linewidth=2, linestyle='--', label='Transect')
+
     ax.set_extent([CHIL_X - 200e3, CHIL_X + 200e3, CHIL_Y - 200e3, CHIL_Y + 200e3], crs=proj)
-    ax.set_title(
-        f"Intersection Area: {intersection_area_km2:.2f} km$^2$\n"
-        f"Percentage of CAMRa coverage: {intersection_area_km2 / circle_area_km2 * 100:.2f}%\n"
-        f"Full beam covered: {sector_angles[0]:.2f}° - {sector_angles[1]:.2f}° "
-        f"({(sector_angles[1] - sector_angles[0]) / 360 * 100:.2f}%)")
-    plt.show()
+    ax.set_title(f"Intersection Area: {intersection_area_km2:.2f} km$^2$\n"
+                 f"Percentage of CAMRa coverage: {intersection_area_km2 / circle_area_km2 * 100:.2f}%\n"
+                 f"Full beam covered: {sector_angles[0]:.2f}° - {sector_angles[1]:.2f}° "
+                 f"({(sector_angles[1] - sector_angles[0]) / 360 * 100:.2f}%)")
+    # plt.show()
 
 
 if __name__ == '__main__':
     figdir = Path(f'/gws/nopw/j04/mcs_prime/mmuetz/upflo/data/upflo_wp1_figs/3D_winds/v6.1/')
     figdir.mkdir(parents=True, exist_ok=True)
 
-    if len(sys.argv) > 1:
+    if len(sys.argv) > 2:
         camra_path = Path(sys.argv[1])
         time_interp = sys.argv[2] == 'True'
     else:
@@ -135,25 +152,32 @@ if __name__ == '__main__':
 
     matcher = locals().get('matcher', None)
     prev_argv = locals().get('prev_argv', None)
-    if matcher is None or prev_argv != sys.argv:
+    # if matcher is None or prev_argv != sys.argv:
+    if matcher is None:
         print('Load objs')
         # Close in time to the RHI scan I want to compare with.
         ds_rad = xr.open_dataset(camra_path).sel(time='2023-08-03 13:10:42', method='nearest')
         matcher = MatchRHIto3dWinds(ds_rad)
         matcher.match()
         prev_argv = sys.argv
-
-    plot_3d_winds_CAMRa_domain(matcher)
-    outfilepath = figdir / f'3D_winds_CAMRA_domains.png'
+    if len(sys.argv) > 1:
+        angle = float(sys.argv[1])
+    else:
+        angle = None
+    plt.figure()
+    plot_3d_winds_CAMRa_domain(matcher, angle)
+    outfilepath = figdir / f'3D_winds_CAMRA_domains.{angle}.png'
     plt.savefig(outfilepath)
 
-    print('plot data')
-    plotter = Plot3dWinds(matcher)
-    plotter.plot()
+    if False:
+        plt.figure()
+        print('plot data')
+        plotter = Plot3dWinds(matcher)
+        plotter.plot()
 
-    camra_time = pd.Timestamp(matcher.ds_rad.time.values.item())
-    tstr = camra_time.strftime('%H%M%S')
-    interpstr = 'interp' if matcher.time_interp else 'nearest'
-    outfilepath = figdir / f'wescon.{camra_path.stem}.CAMRa_{tstr}.{interpstr}.png'
-    print(outfilepath)
-    plt.savefig(outfilepath)
+        camra_time = pd.Timestamp(matcher.ds_rad.time.values.item())
+        tstr = camra_time.strftime('%H%M%S')
+        interpstr = 'interp' if matcher.time_interp else 'nearest'
+        outfilepath = figdir / f'wescon.{camra_path.stem}.CAMRa_{tstr}.{interpstr}.png'
+        print(outfilepath)
+        plt.savefig(outfilepath)
