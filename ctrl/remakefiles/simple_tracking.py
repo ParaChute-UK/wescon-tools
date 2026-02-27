@@ -1,7 +1,7 @@
 from remake import Remake, Rule
 from simple_track import nimrod_user_functions
 
-from proj_config import PATHS, CASES, KASBEX_CASES
+from wescon_tools.proj_config import PATHS, CASES, KASBEX_CASES
 from simple_track.storm_track import StormTracker
 
 slurm_config = {'account': 'mcs_prime', 'partition': 'standard', 'qos': 'short', 'mem': 64000}

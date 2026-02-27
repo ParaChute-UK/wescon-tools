@@ -2,6 +2,7 @@
 
 Handles CAMRa and Kepler radar data, located at Chilbolton and Lyneham respectively.
 
+**IMPORTANT** you have to run extract_convert_radarnet_dat_to_nc.py first.
 **IMPORTANT** the dependency handling is not perfect between different rules. You might have to run multiple times.
 
 * Regrids data from polar to cartesian coords.
@@ -14,7 +15,6 @@ Contact: mark.muetzelfeldt@reading.ac.uk
 """
 from dataclasses import dataclass
 from itertools import batched, product
-from pathlib import Path
 
 import cartopy.crs as ccrs
 import matplotlib.gridspec as gridspec
@@ -28,7 +28,7 @@ from scipy.signal import find_peaks
 import scipy.stats as spstats
 import seaborn as sns
 
-import proj_config as conf
+from wescon_tools import proj_config as conf
 from remake import Remake, Rule
 from simple_track.nimrod_user_functions import FileLoader
 from wescon_tools.custom_osgb import CustomOSGB
@@ -106,7 +106,10 @@ class RegridCAMRaKeplerL1(Rule):
     @staticmethod
     def rule_matrix():
         paths = []
-        for case, radar in product(conf.CASES, ['camra', 'kepler']):
+        # TODO!
+        # radars = ['camra', 'kepler']
+        radars = ['camra']
+        for case, radar in product(conf.CASES, radars):
             for batch_idx in list(range(len(cpmap(case, radar)))):
                 paths.append((case, radar, batch_idx))
 

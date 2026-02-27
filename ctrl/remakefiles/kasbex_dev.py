@@ -8,7 +8,7 @@ import pandas as pd
 import seaborn as sns
 import xarray as xr
 
-import proj_config as conf
+from wescon_tools import proj_config as conf
 from remake import Remake, Rule
 from wescon_tools.flow_interp import FlowInterp
 from wescon_tools.util import to_netcdf_tmp_then_copy
