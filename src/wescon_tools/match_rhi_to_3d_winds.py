@@ -239,8 +239,8 @@ class Plot3dWinds:
                          # -self.hor_div.isel(time=0).values * 1e4,
                          levels=[-4, -1, 1, 4], linestyles=None, negative_linestyles='dashed', colors='k', )
         ax2.clabel(cs, cs.levels, inline=True, fontsize=9)
-        ax2.set_xlim(60, 85)
-        ax2.set_ylim(0, 8.5)
+        # ax2.set_xlim(60, 85)
+        # ax2.set_ylim(0, 8.5)
         q = ax2.quiver(self.r / 1e3, self.ds3d_osgb.altitude / 1e3, self.matcher.hor_wind_plane,
                        self.matcher.w_plane * 5, scale=200, pivot='mid')
         ax2.quiverkey(q, X=0.7, Y=1.02, U=4, label='hor: 5 m s$^{-1}$, vert: 1 m s$^{-1}$', labelpos='E')
@@ -283,7 +283,7 @@ class Plot3dWinds:
         w_alt = self.ds3d_osgb.sel(altitude=2000, method='nearest').altitude.values.item()
         camra_time = pd.Timestamp(self.ds_rad.time.values.item())
         tstr = camra_time.strftime('%H:%M:%S')
-        titles = [f'Along-beam $w$ at {w_alt:.0f} m', 'Along-beam RadarNet rain', '3D winds along transect at 13:10:00',
+        titles = [f'Along-beam $w$ at {w_alt:.0f} m', 'Along-beam RadarNet rain', f'3D winds along transect at {tstr}',
                   f'CAMRa RHI at {tstr}', ]
 
         for i, ax in enumerate(axes.flatten()):

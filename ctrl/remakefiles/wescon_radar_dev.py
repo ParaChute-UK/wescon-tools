@@ -14,6 +14,7 @@ Contact: mark.muetzelfeldt@reading.ac.uk
 """
 from dataclasses import dataclass
 from itertools import batched, product
+from pathlib import Path
 
 import cartopy.crs as ccrs
 import matplotlib.gridspec as gridspec
@@ -35,6 +36,7 @@ from wescon_tools.flow_interp import FlowInterp
 from wescon_tools.radar_intersection import RadarIntersectionCalculator, RadarIntersection
 from wescon_tools.radar_util import add_cartesian_coords, RadarRegridder, xr_find_cloud_objects
 from wescon_tools.util import to_netcdf_tmp_then_copy
+from wescon_tools.match_rhi_to_3d_winds import MatchRHIto3dWinds, Plot3dWinds
 
 # Coords of Chilbolton in eastings/northings
 CHIL_X = 439285
@@ -697,10 +699,21 @@ class CompareDeltaZCandidates(Rule):
             ds1_comp, ds2_comp = CompareDeltaZCandidates.create_composites(ds1, ds2, list(beam_idx1), list(beam_idx2))
             labels1, labels2, objs1, objs2 = CompareDeltaZCandidates.find_coherent_objects(ds1_comp, ds2_comp)
             matches = CompareDeltaZCandidates.find_overlapping_cloud_matches(labels1, labels2, objs1, objs2)
+            matcher = MatchRHIto3dWinds(ds1_comp, time_interp=False)
+            matcher.match()
+            w_plane_hr = matcher.w_plane_hr
+            plotter = Plot3dWinds(matcher)
+            plotter.plot()
+            figdir = outputs['dZ_stats'].parent
+            figpath = figdir / f'3d_winds_{perp_offset}.png'
+            print(figpath)
+            plt.savefig(figpath)
+            continue
 
             for cl1, cl2 in matches:
-                (ds1_sub, ds2_sub, cloud_union, xmin, xmax, zmax, x_idxmin, x_idxmax,
-                 z_idxmax) = CompareDeltaZCandidates.subset_fields(cl1, cl2, ds1_comp, ds2_comp, labels1, labels2)
+                (ds1_sub, ds2_sub, w_plane_hr_sub, cloud_union, xmin, xmax, zmax, x_idxmin, x_idxmax,
+                 z_idxmax) = CompareDeltaZCandidates.subset_fields(cl1, cl2, ds1_comp, ds2_comp, w_plane_hr, labels1, labels2)
+                w_plane_hr_10dBZ = w_plane_hr_sub.values[ds1_sub.rhi_Z > 10]
 
                 (wind_parallel_offset, _, _, _, _) = CompareDeltaZCandidates.calc_parallel_perpendicular_winds(ds1_comp,
                     ds2_comp, x_idxmin, x_idxmax)
@@ -747,9 +760,13 @@ class CompareDeltaZCandidates(Rule):
                         'deltaZ_mean_20dBZ': np.nanmean(deltaZ_20dBZ),
                         'deltaZ_absmean_20dBZ': np.nanmean(np.abs(deltaZ_20dBZ)),
                         'deltaZ_posmean_20dBZ': np.nanmean(deltaZ_20dBZ[deltaZ_20dBZ > 0]),
+                        '3d_wind_max_w': np.nanmax(w_plane_hr_10dBZ),
+                        '3d_wind_mean_w': np.nanmean(w_plane_hr_10dBZ),
                         'figname': str(figname), }
                     dZ_stats.append(stats_entry)
+                    breakpoint()
 
+        return
         df_dZ_stats = pd.DataFrame(dZ_stats)
         df_dZ_stats.to_hdf(outputs['dZ_stats'], key='dZ_stats')
 
@@ -866,23 +883,12 @@ class CompareDeltaZCandidates(Rule):
         return matches
 
     @staticmethod
-    def subset_fields(cl1, cl2, ds1_comp, ds2_comp, labels1, labels2):
+    def subset_fields(cl1, cl2, ds1_comp, ds2_comp, w_plane_hr, labels1, labels2):
         """Subset the fields based on the current objects (in labels1/2)
 
         * Calculate the union (as in set union) between the 2 objects and use to calculate e.g. xmin, xmax
         *of both objects*.
         * Use the parallel winds to calculate the estimated (parallel) offset.
-
-        Args:
-            cl1: First cloud idx.
-            cl2: Second cloud idx.
-            ds1_comp: First composite.
-            ds2_comp: Second composite.
-            labels1: Full cloud lables (2d)
-            labels2: Full cloud lables (2d)
-
-        Returns:
-            (ds1_sub, ds2_sub, xmin, xmax, est_offset)
         """
         # Find the union of both coherent objs.
         cloud_union = (labels1 == cl1) | (labels2 == cl2)
@@ -900,8 +906,10 @@ class CompareDeltaZCandidates(Rule):
         # Slice datasets to domain of interest defined by cloud_union
         ds1_sub = ds1_comp.isel(x=slice(x_idxmin, x_idxmax), z=slice(None, z_idxmax))
         ds2_sub = ds2_comp.isel(x=slice(x_idxmin, x_idxmax), z=slice(None, z_idxmax))
+        w_plane_hr_sub = w_plane_hr.isel(transect=slice(x_idxmin, x_idxmax), altitude=slice(None, z_idxmax))
+        breakpoint()
 
-        return ds1_sub, ds2_sub, cloud_union, xmin, xmax, zmax, x_idxmin, x_idxmax, z_idxmax
+        return ds1_sub, ds2_sub, w_plane_hr_sub, cloud_union, xmin, xmax, zmax, x_idxmin, x_idxmax, z_idxmax
 
     @staticmethod
     def calc_cross_correlation(daZ1, daZ2):
@@ -1234,6 +1242,40 @@ wind angle from: {wind_angle_from:.2f}$\degree$'''
         ax.set_xlim(-150, 150)
         ax.set_ylim(-150, 150)
 
+
+class Anim3dWind(Rule):
+    rule_matrix = {'case': conf.CASES}
+
+    @staticmethod
+    def rule_inputs(case):
+        year = case[:4]
+        month = case[4:6]
+        day = case[6:]
+        start = pd.Timestamp(int(year), int(month), int(day))
+        end = start + pd.Timedelta(days=1)
+        winddir = Path('/gws/pw/j07/woest/rjthomps/winds3d/data/')
+        filetpl = '%Y%m%d/grid_1000m_filter_1_0_%Y%m%d_%H%M_v6.1.nc'
+        inputs = {}
+        for time in pd.date_range(start, end, freq='10min'):
+            path = winddir / time.strftime(filetpl)
+            if path.exists():
+                inputs[time] = path
+        return inputs
+
+
+    @staticmethod
+    def rule_outputs(case):
+        outdir = conf.PATHS['figdir'] / '3D_wind_anim' / output_vn / case
+        return {'anim': outdir / 'anim.dummy', }
+
+    @staticmethod
+    def rule_run(inputs, outputs, case):
+        for path in inputs.values():
+            print(path)
+            ds = xr.open_dataset(path)
+            print(ds)
+            break
+        outputs['anim'].touch()
 
 class GatherDeltaZStats(Rule):
     """Gather all scattered stats.hdf files into a single file for each case."""
