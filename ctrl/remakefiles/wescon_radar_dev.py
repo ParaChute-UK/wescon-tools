@@ -196,7 +196,11 @@ class RegridCAMRaKeplerL1(Rule):
     def flow_interp_radarnet(da_rain, time):
         rain_times = pd.DatetimeIndex(da_rain.time)
         # N.B. 300 s == 5 min
-        isel_time = np.abs((rain_times - time).to_series().dt.total_seconds().values) < 300
+        if time.minute % 5 == 0 and time.second == 0 and time.microsecond == 0:
+            # This happened exactly once. Pick time and next time.
+            isel_time = (rain_times == time) | (rain_times == time + pd.Timedelta(seconds=300))
+        else:
+            isel_time = np.abs((rain_times - time).to_series().dt.total_seconds().values) < 300
         da_rain_either_side = da_rain.isel(time=isel_time)
         fi = FlowInterp(da_rain_either_side[0].values, da_rain_either_side[1].values, stride=10, max_flow_speed=15)
         if time.minute % 5 == 0 and time.second == 0:
