@@ -1243,40 +1243,6 @@ wind angle from: {wind_angle_from:.2f}$\degree$'''
         ax.set_ylim(-150, 150)
 
 
-class Anim3dWind(Rule):
-    rule_matrix = {'case': conf.CASES}
-
-    @staticmethod
-    def rule_inputs(case):
-        year = case[:4]
-        month = case[4:6]
-        day = case[6:]
-        start = pd.Timestamp(int(year), int(month), int(day))
-        end = start + pd.Timedelta(days=1)
-        winddir = Path('/gws/pw/j07/woest/rjthomps/winds3d/data/')
-        filetpl = '%Y%m%d/grid_1000m_filter_1_0_%Y%m%d_%H%M_v6.1.nc'
-        inputs = {}
-        for time in pd.date_range(start, end, freq='10min'):
-            path = winddir / time.strftime(filetpl)
-            if path.exists():
-                inputs[time] = path
-        return inputs
-
-
-    @staticmethod
-    def rule_outputs(case):
-        outdir = conf.PATHS['figdir'] / '3D_wind_anim' / output_vn / case
-        return {'anim': outdir / 'anim.dummy', }
-
-    @staticmethod
-    def rule_run(inputs, outputs, case):
-        for path in inputs.values():
-            print(path)
-            ds = xr.open_dataset(path)
-            print(ds)
-            break
-        outputs['anim'].touch()
-
 class GatherDeltaZStats(Rule):
     """Gather all scattered stats.hdf files into a single file for each case."""
     rule_matrix = {'case': conf.CASES}
