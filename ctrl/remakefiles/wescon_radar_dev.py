@@ -715,7 +715,6 @@ class CompareDeltaZCandidates(Rule):
             figpath = figdir / f'3d_winds_{perp_offset}.png'
             print(figpath)
             plt.savefig(figpath)
-            continue
 
             for cl1, cl2 in matches:
                 (ds1_sub, ds2_sub, w_plane_hr_sub, cloud_union, xmin, xmax, zmax, x_idxmin, x_idxmax,
@@ -771,9 +770,7 @@ class CompareDeltaZCandidates(Rule):
                         '3d_wind_mean_w': np.nanmean(w_plane_hr_10dBZ),
                         'figname': str(figname), }
                     dZ_stats.append(stats_entry)
-                    breakpoint()
 
-        return
         df_dZ_stats = pd.DataFrame(dZ_stats)
         df_dZ_stats.to_hdf(outputs['dZ_stats'], key='dZ_stats')
 
@@ -906,6 +903,9 @@ class CompareDeltaZCandidates(Rule):
         x_idxmin = x_idxmin - compare_settings.subset_offset_pad
         x_idxmax = x_idxmax + compare_settings.subset_offset_pad
         z_idxmax = z_idxmax + compare_settings.subset_offset_pad
+        x_idxmin = max(x_idxmin, 0)
+        x_idxmax = min(x_idxmax, ds1_comp.x.size - 1)
+        z_idxmax = min(z_idxmax, ds1_comp.z.size - 1)
         xmin = ds1_comp.x.values[x_idxmin]
         xmax = ds1_comp.x.values[x_idxmax]
         zmax = ds1_comp.z.values[z_idxmax]
@@ -914,7 +914,6 @@ class CompareDeltaZCandidates(Rule):
         ds1_sub = ds1_comp.isel(x=slice(x_idxmin, x_idxmax), z=slice(None, z_idxmax))
         ds2_sub = ds2_comp.isel(x=slice(x_idxmin, x_idxmax), z=slice(None, z_idxmax))
         w_plane_hr_sub = w_plane_hr.isel(transect=slice(x_idxmin, x_idxmax), altitude=slice(None, z_idxmax))
-        breakpoint()
 
         return ds1_sub, ds2_sub, w_plane_hr_sub, cloud_union, xmin, xmax, zmax, x_idxmin, x_idxmax, z_idxmax
 
