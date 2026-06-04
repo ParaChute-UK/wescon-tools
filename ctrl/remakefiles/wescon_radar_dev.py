@@ -768,78 +768,99 @@ class CompareDeltaZCandidates(Rule):
             plt.savefig(figpath)
 
             for cl1, cl2 in matches:
-                (ds1_sub, ds2_sub, w_plane_hr_sub, cloud_union, xmin, xmax, zmax, x_idxmin, x_idxmax,
-                 z_idxmax) = CompareDeltaZCandidates.subset_fields(cl1, cl2, ds1_comp, ds2_comp, w_plane_hr, labels1, labels2)
-                w_plane_hr_10dBZ = w_plane_hr_sub.values[ds1_sub.rhi_Z > 10]
-
-                (wind_parallel_offset, mean_wind_parallel, mean_wind_perpendicular,
-                 transect_wind_parallel, transect_wind_perpendicular) = (
-                    CompareDeltaZCandidates.calc_parallel_perpendicular_winds(ds1_comp, ds2_comp, x_idxmin, x_idxmax))
-                xmid = (xmax + xmin) / 2
-                aligned = new_beam_idxs[int(round(xmid))] == (beam_idx1, beam_idx2)
-
-                cc_result = CompareDeltaZCandidates.calc_cross_correlation(ds1_sub.rhi_Z, ds2_sub.rhi_Z)
-                for corr_parallel_offset in cc_result.valid_parallel_offsets:
-                    optimal = (corr_parallel_offset == cc_result.valid_parallel_offsets[
-                        np.argmin(np.abs(cc_result.valid_parallel_offsets - wind_parallel_offset))])
-
-                    ctx = DeltaZCandidateContext(
-                        bracket_idx1=bracket_idx1, bracket_idx2=bracket_idx2,
-                        beam_idx1=beam_idx1, beam_idx2=beam_idx2,
-                        ds1=ds1, ds2=ds2,
-                        ds1_comp=ds1_comp, ds2_comp=ds2_comp,
-                        ds1_sub=ds1_sub, ds2_sub=ds2_sub,
-                        cl1=cl1, cl2=cl2, cloud_union=cloud_union,
-                        labels1=labels1, labels2=labels2,
-                        xmin=xmin, xmax=xmax, zmax=zmax,
-                        x_idxmin=x_idxmin, x_idxmax=x_idxmax, z_idxmax=z_idxmax,
-                        cc_result=cc_result,
-                        wind_parallel_offset=wind_parallel_offset,
-                        mean_wind_parallel=mean_wind_parallel,
-                        mean_wind_perpendicular=mean_wind_perpendicular,
-                        transect_wind_parallel=transect_wind_parallel,
-                        transect_wind_perpendicular=transect_wind_perpendicular,
-                        offset=corr_parallel_offset,
-                        optimal=optimal,
-                        aligned=aligned,
-                    )
-
-                    figname = CompareDeltaZCandidates.plot_dashboard(outputs, ctx)
-                    CompareDeltaZCandidates.save_results(outputs, ctx)
-
-                    def get_obj_field(objs, cl, field):
-                        obj_cloud_idx = np.where(objs.isel(time=0).cloud_label.values == cl)[0].item()
-                        return objs.isel(time=0).sel(reflectivity_thresh=10)[field].values[obj_cloud_idx]
-
-                    deltaZ = np.roll(ds2_sub.rhi_Z.values, int(corr_parallel_offset), axis=1) - ds1_sub.rhi_Z.values
-                    deltaZ_20dBZ = deltaZ[ds1_sub.rhi_Z > 20]
-
-                    az_mean1 = ds1_comp.rhi_mean_az.values.mean()
-                    az_mean2 = ds2_comp.rhi_mean_az.values.mean()
-                    # TODO: save info on winds for easy reference.
-                    stats_entry = {'case': case, 'bracket_idx1': bracket_idx1, 'bracket_idx2': bracket_idx2,
-                        'time1': pd.Timestamp(ds1_comp.time.values.item()),
-                        'time2': pd.Timestamp(ds2_comp.time.values.item()),
-                        'az_mean1': az_mean1, 'az_mean2': az_mean2,
-                        'xmin': xmin, 'xmax': xmax, 'zmax': zmax,
-                        'cl1': cl1, 'cl2': cl2,
-                        'perp_offset': perp_offset, 'parallel_offset': corr_parallel_offset,
-                        'optimal_parallel_offset': optimal, 'aligned_perp_offset': aligned,
-                        'o1_cloud_max_z': get_obj_field(objs1, cl1, 'cloud_max_z'),
-                        'o2_cloud_max_z': get_obj_field(objs2, cl2, 'cloud_max_z'),
-                        'deltaZ_mean': np.nanmean(deltaZ),
-                        'deltaZ_absmean': np.nanmean(np.abs(deltaZ)),
-                        'deltaZ_posmean': np.nanmean(deltaZ[deltaZ > 0]),
-                        'deltaZ_mean_20dBZ': np.nanmean(deltaZ_20dBZ),
-                        'deltaZ_absmean_20dBZ': np.nanmean(np.abs(deltaZ_20dBZ)),
-                        'deltaZ_posmean_20dBZ': np.nanmean(deltaZ_20dBZ[deltaZ_20dBZ > 0]),
-                        '3d_wind_max_w': np.nanmax(w_plane_hr_10dBZ),
-                        '3d_wind_mean_w': np.nanmean(w_plane_hr_10dBZ),
-                        'figname': str(figname), }
-                    dZ_stats.append(stats_entry)
+                dZ_stats.extend(CompareDeltaZCandidates._process_cloud_match(
+                    cl1, cl2, ds1, ds2, ds1_comp, ds2_comp, w_plane_hr,
+                    labels1, labels2, objs1, objs2,
+                    new_beam_idxs, beam_idx1, beam_idx2,
+                    bracket_idx1, bracket_idx2, perp_offset, outputs, case,
+                ))
 
         df_dZ_stats = pd.DataFrame(dZ_stats)
         df_dZ_stats.to_hdf(outputs['dZ_stats'], key='dZ_stats')
+
+    @staticmethod
+    def _process_cloud_match(cl1, cl2, ds1, ds2, ds1_comp, ds2_comp, w_plane_hr,
+                             labels1, labels2, objs1, objs2,
+                             new_beam_idxs, beam_idx1, beam_idx2,
+                             bracket_idx1, bracket_idx2, perp_offset, outputs, case):
+        """Process one cloud pair across all valid parallel offsets.
+
+        Returns a list of stats dicts, one per corr_parallel_offset.
+        """
+        (ds1_sub, ds2_sub, w_plane_hr_sub, cloud_union, xmin, xmax, zmax, x_idxmin, x_idxmax,
+         z_idxmax) = CompareDeltaZCandidates.subset_fields(cl1, cl2, ds1_comp, ds2_comp, w_plane_hr, labels1, labels2)
+        w_plane_hr_10dBZ = w_plane_hr_sub.values[ds1_sub.rhi_Z > 10]
+
+        (wind_parallel_offset, mean_wind_parallel, mean_wind_perpendicular,
+         transect_wind_parallel, transect_wind_perpendicular) = (
+            CompareDeltaZCandidates.calc_parallel_perpendicular_winds(ds1_comp, ds2_comp, x_idxmin, x_idxmax))
+        xmid = (xmax + xmin) / 2
+        aligned = new_beam_idxs[int(round(xmid))] == (beam_idx1, beam_idx2)
+
+        cc_result = CompareDeltaZCandidates.calc_cross_correlation(ds1_sub.rhi_Z, ds2_sub.rhi_Z)
+
+        stats = []
+        for corr_parallel_offset in cc_result.valid_parallel_offsets:
+            optimal = (corr_parallel_offset == cc_result.valid_parallel_offsets[
+                np.argmin(np.abs(cc_result.valid_parallel_offsets - wind_parallel_offset))])
+
+            ctx = DeltaZCandidateContext(
+                bracket_idx1=bracket_idx1, bracket_idx2=bracket_idx2,
+                beam_idx1=beam_idx1, beam_idx2=beam_idx2,
+                ds1=ds1, ds2=ds2,
+                ds1_comp=ds1_comp, ds2_comp=ds2_comp,
+                ds1_sub=ds1_sub, ds2_sub=ds2_sub,
+                cl1=cl1, cl2=cl2, cloud_union=cloud_union,
+                labels1=labels1, labels2=labels2,
+                xmin=xmin, xmax=xmax, zmax=zmax,
+                x_idxmin=x_idxmin, x_idxmax=x_idxmax, z_idxmax=z_idxmax,
+                cc_result=cc_result,
+                wind_parallel_offset=wind_parallel_offset,
+                mean_wind_parallel=mean_wind_parallel,
+                mean_wind_perpendicular=mean_wind_perpendicular,
+                transect_wind_parallel=transect_wind_parallel,
+                transect_wind_perpendicular=transect_wind_perpendicular,
+                offset=corr_parallel_offset,
+                optimal=optimal,
+                aligned=aligned,
+            )
+
+            figname = CompareDeltaZCandidates.plot_dashboard(outputs, ctx)
+            CompareDeltaZCandidates.save_results(outputs, ctx)
+            stats.append(CompareDeltaZCandidates._build_stats_entry(
+                ctx, objs1, objs2, w_plane_hr_10dBZ, perp_offset, case, figname,
+            ))
+        return stats
+
+    @staticmethod
+    def _build_stats_entry(ctx, objs1, objs2, w_plane_hr_10dBZ, perp_offset, case, figname):
+        """Assemble the scalar statistics dict for one (cloud pair, parallel offset) combination."""
+        deltaZ = np.roll(ctx.ds2_sub.rhi_Z.values, int(ctx.offset), axis=1) - ctx.ds1_sub.rhi_Z.values
+        deltaZ_20dBZ = deltaZ[ctx.ds1_sub.rhi_Z > 20]
+        # TODO: save info on winds for easy reference.
+        return {
+            'case': case,
+            'bracket_idx1': ctx.bracket_idx1, 'bracket_idx2': ctx.bracket_idx2,
+            'time1': pd.Timestamp(ctx.ds1_comp.time.values.item()),
+            'time2': pd.Timestamp(ctx.ds2_comp.time.values.item()),
+            'az_mean1': ctx.ds1_comp.rhi_mean_az.values.mean(),
+            'az_mean2': ctx.ds2_comp.rhi_mean_az.values.mean(),
+            'xmin': ctx.xmin, 'xmax': ctx.xmax, 'zmax': ctx.zmax,
+            'cl1': ctx.cl1, 'cl2': ctx.cl2,
+            'perp_offset': perp_offset, 'parallel_offset': ctx.offset,
+            'optimal_parallel_offset': ctx.optimal, 'aligned_perp_offset': ctx.aligned,
+            'o1_cloud_max_z': CompareDeltaZCandidates.get_obj_field(objs1, ctx.cl1, 'cloud_max_z'),
+            'o2_cloud_max_z': CompareDeltaZCandidates.get_obj_field(objs2, ctx.cl2, 'cloud_max_z'),
+            'deltaZ_mean': np.nanmean(deltaZ),
+            'deltaZ_absmean': np.nanmean(np.abs(deltaZ)),
+            'deltaZ_posmean': np.nanmean(deltaZ[deltaZ > 0]),
+            'deltaZ_mean_20dBZ': np.nanmean(deltaZ_20dBZ),
+            'deltaZ_absmean_20dBZ': np.nanmean(np.abs(deltaZ_20dBZ)),
+            'deltaZ_posmean_20dBZ': np.nanmean(deltaZ_20dBZ[deltaZ_20dBZ > 0]),
+            '3d_wind_max_w': np.nanmax(w_plane_hr_10dBZ),
+            '3d_wind_mean_w': np.nanmean(w_plane_hr_10dBZ),
+            'figname': str(figname),
+        }
 
     @staticmethod
     def load_data(bracket_idx1, bracket_idx2, inputs):
@@ -1075,6 +1096,11 @@ class CompareDeltaZCandidates(Rule):
         figdir = outputs['dZ_stats'].parent
         plt.savefig(figdir / fname)
         return figdir / fname
+
+    @staticmethod
+    def get_obj_field(objs, cl, field):
+        obj_cloud_idx = np.where(objs.isel(time=0).cloud_label.values == cl)[0].item()
+        return objs.isel(time=0).sel(reflectivity_thresh=10)[field].values[obj_cloud_idx]
 
     @staticmethod
     def save_results(outputs, ctx: DeltaZCandidateContext):
@@ -1358,6 +1384,12 @@ class MatchRHIsToStorms(Rule):
                                           f'match_rhi_storm_stats.{dZ_stats_filters}.hdf')}
 
     @staticmethod
+    def storm_label_to_idx(df, time, label):
+        storm_row = df[(df.time == time) & (df.storm_label_idx.values == label)]
+        assert len(storm_row) == 1
+        return int(storm_row.iloc[0].storm_idx)
+
+    @staticmethod
     def rule_run(inputs, outputs, case, tracking_precip_thresh, dZ_stats_filters):
         figdir = outputs['match_rhi_storm_stats'].parent
         df_candidate_scans, df_dZ_stats, df_storms, ds_storms = MatchRHIsToStorms.load_data(case, inputs, tracking_precip_thresh)
@@ -1395,11 +1427,6 @@ class MatchRHIsToStorms(Rule):
 
                 precip_along_beam = ds_storms.rain.sel(time=time, method='nearest').interp(eastings=transect_x, northings=transect_y, method='linear')
                 mean_precip_along_beam = precip_along_beam.mean().values.item()
-                def storm_label_to_idx(df, time, label):
-                    storm_row = df[(df.time == time) & (df.storm_label_idx.values == label)]
-                    assert len(storm_row) == 1
-                    return int(storm_row.iloc[0].storm_idx)
-
                 df_data.append({
                     'dZ_stats_idx': row.name,
                     'scan_idx': scan_idx,
@@ -1408,7 +1435,7 @@ class MatchRHIsToStorms(Rule):
                     'mean_precip_along_beam': mean_precip_along_beam,
                     'nstorms': len(unique_storm_labels),
                     **{f'storm_label{j + 1}': int(unique_storm_labels[j]) for j in range(len(unique_storm_labels))},
-                    **{f'storm_idx{j + 1}': storm_label_to_idx(df_storms, storm_time, unique_storm_labels[j])
+                    **{f'storm_idx{j + 1}': MatchRHIsToStorms.storm_label_to_idx(df_storms, storm_time, unique_storm_labels[j])
                        for j in range(len(unique_storm_labels))},
                 })
                 print(df_data[-1])
