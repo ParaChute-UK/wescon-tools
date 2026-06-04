@@ -56,13 +56,16 @@ class Settings:
     # Domain to keep around Chilbolton.
     domain_halfwidth: float = 180e3  # km
     # Regrid settings.
-    default_regrid_dx = 50  # m
-    default_regrid_dz = 100 / 3  # m
-    default_lid = 12  # km
-    camra_end = 150  # km
-    kepler_end = 50  # km
-    deltaZ_time_thresh = 3  # minute
-    deltaZ_az_thresh = 5  # deg
+    default_regrid_dx: float = 50  # m
+    default_regrid_dz: float = 100 / 3  # m
+    default_lid: float = 12  # km
+    camra_end: float = 150  # km
+    kepler_end: float = 50  # km
+    deltaZ_time_thresh: int = 3  # minute
+    deltaZ_az_thresh: float = 5  # deg
+    # Bracket azimuth step limits used by find_brackets.
+    bracket_az_lower_limit: float = 0.1  # deg
+    bracket_az_upper_limit: float = 0.8  # deg
 
 
 settings = Settings()
@@ -490,11 +493,14 @@ class PlotCamraKeplerMatch(Rule):
         outputs['output'].touch()
 
 
-def find_brackets(df, az_lower_limit=0.1, az_upper_limit=0.8, nperbracket=4):
+def find_brackets(df):
     """Find all brackets in given data
 
     Search through each row (scan) and see if the azimuth offset is consistent with them being in the same bracket.
     """
+    az_lower_limit = settings.bracket_az_lower_limit
+    az_upper_limit = settings.bracket_az_upper_limit
+    nperbracket = compare_settings.num_scans_per_bracket
     currbracket = 0
     nbracket = 0
     bracket = [currbracket]
@@ -655,9 +661,9 @@ class CompareDeltaZCandidatesSettings:
     refl_thresh2: int = 35
     refl_thresh3: int = 55
     # Amount (gridded grid cells) to offset the subsetted fields by
-    subset_offset_pad = 20  # == 1.5km (20 * 75m) in x, 666.6m (20 * 33.33m) in z.
+    subset_offset_pad: int = 20  # == 1.5km (20 * 75m) in x, 666.6m (20 * 33.33m) in z.
     # Correlation offset threshold (max allowable)
-    corr_offset_thresh = 20
+    corr_offset_thresh: int = 20
 
 
 compare_settings = CompareDeltaZCandidatesSettings()
