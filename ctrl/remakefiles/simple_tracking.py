@@ -4,7 +4,7 @@ from simple_track import nimrod_user_functions
 from wescon_tools.proj_config import PATHS, CASES, KASBEX_CASES
 from simple_track.storm_track import StormTracker
 
-slurm_config = {'account': 'mcs_prime', 'partition': 'standard', 'qos': 'short', 'mem': 64000}
+slurm_config = {'account': 'afesp', 'partition': 'standard', 'qos': 'short', 'mem': 64000}
 rmk = Remake(config=dict(slurm=slurm_config))
 
 OUTDIR = PATHS['outdir'] / 'simple_track'
@@ -16,9 +16,9 @@ class TrackDay(Rule):
         month = case[4:6]
         day = case[6:8]
 
-        # /gws/nopw/j04/mcs_prime/mmuetz/upflo/data/nimrod/2025/09/11/metoffice-c-band-rain-radar_uk_20250911.nc
-        return {'radarnet': f'/gws/nopw/j04/mcs_prime/mmuetz/upflo/data/radarnet/{year}/{month}/{day}/'
-                            f'metoffice-c-band-rain-radar_uk_{year}{month}{day}.nc'}
+        datadir = PATHS['datadir']
+
+        return {'radarnet': datadir / f'radarnet/{year}/{month}/{day}/metoffice-c-band-rain-radar_uk_{year}{month}{day}.nc'}
 
     @staticmethod
     def rule_outputs(case, tracking_method, tracking_precip_thresh):

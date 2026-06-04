@@ -18,7 +18,7 @@ from wescon_tools.radar_util import add_cartesian_coords, RadarRegridder, xr_fin
 CHIL_X = 439285
 CHIL_Y = 138620
 
-slurm_config = {'account': 'mcs_prime', 'partition': 'standard', 'qos': 'short', 'mem': 64000}
+slurm_config = {'account': 'afesp', 'partition': 'standard', 'qos': 'short', 'mem': 64000}
 rmk = Remake(config=dict(slurm=slurm_config))
 
 LOAD_RADARNET = False
@@ -156,8 +156,8 @@ class RegridCAMRaKeplerL1(Rule):
         return {
             **{'radar_paths': paths},
             **{
-                'nimrod': conf.PATHS['datadir']
-                          / f'nimrod/{case[:4]}/{case[4:6]}/{case[6:8]}/metoffice-c-band-rain-radar_uk_{case}.nc'
+                'radarnet': conf.PATHS['datadir']
+                            / f'radarnet/{case[:4]}/{case[4:6]}/{case[6:8]}/metoffice-c-band-rain-radar_uk_{case}.nc'
             },
         }
 
@@ -170,7 +170,7 @@ class RegridCAMRaKeplerL1(Rule):
     @staticmethod
     def rule_run(inputs, outputs, case, radar, batch_idx):
         if LOAD_RADARNET:
-            da_rain = xr.open_dataarray(inputs['nimrod'])
+            da_rain = xr.open_dataarray(inputs['radarnet'])
 
             domain_halfwidth = 180e3
             da_rain = da_rain.sel(
@@ -291,8 +291,8 @@ class FindMatches(Rule):
 
     @staticmethod
     def rule_run(inputs, outputs, case):
-        cam_dir = conf.PATHS['outdir'] / 'kasbex' / case / 'camra'
-        kep_dir = conf.PATHS['outdir'] / 'kasbex' / case / 'kepler'
+        cam_dir = conf.PATHS['kasbexoutdir'] / 'regridded' / case / 'camra'
+        kep_dir = conf.PATHS['kasbexoutdir'] / 'regridded' / case / 'kepler'
         cam_paths = sorted(cam_dir.glob('gridded_ncas-radar-camra-1_cao_*_rhi_l1_v1.0.1.nc'))
         kep_paths = sorted(kep_dir.glob('gridded_ncas-mobile-ka-band-radar-1_cao_*_rhi_l1_v1.0.0.nc'))
 

@@ -17,10 +17,9 @@ from wescon_tools.proj_config import PATHS, CASES, KASBEX_CASES
 
 # Access has been suspended. I can still download each file through the web interface tho ¯\_(ツ)_/¯
 BADC_DATADIR = Path('/badc/ukmo-nimrod/data/composite/uk-1km/')
-# BADC_DATADIR = Path('/gws/nopw/j04/mcs_prime/mmuetz/upflo/data/nimrod/raw')
 OUTDIR = PATHS['datadir'] / 'radarnet'
 
-slurm_config = {'account': 'mcs_prime', 'partition': 'standard', 'qos': 'standard', 'mem': 64000}
+slurm_config = {'account': 'afesp', 'partition': 'standard', 'qos': 'standard', 'mem': 64000}
 rmk = Remake(config=dict(slurm=slurm_config))
 
 

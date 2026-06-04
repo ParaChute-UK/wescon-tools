@@ -14,6 +14,7 @@ Handles CAMRa and Kepler radar data, located at Chilbolton and Lyneham respectiv
 Contact: mark.muetzelfeldt@reading.ac.uk
 """
 from dataclasses import dataclass
+from typing import Any
 from itertools import batched, product
 
 import cartopy.crs as ccrs
@@ -66,9 +67,11 @@ class Settings:
 
 settings = Settings()
 
-output_vn = 'v7'
+# Check changes using new DeltaZCandidateContext dataclass.
+# Compare against v8.
+output_vn = 'v9'
 
-slurm_config = {'account': 'mcs_prime', 'partition': 'standard', 'qos': 'short', 'mem': 64000, 'exclude': 'host1117'}
+slurm_config = {'account': 'afesp', 'partition': 'standard', 'qos': 'short', 'mem': 64000, 'exclude': 'host1117'}
 rmk = Remake(config=dict(slurm=slurm_config))
 
 
@@ -660,6 +663,54 @@ class CompareDeltaZCandidatesSettings:
 compare_settings = CompareDeltaZCandidatesSettings()
 
 
+@dataclass
+class DeltaZCandidateContext:
+    """Bundles all per-candidate data for plot_dashboard and save_results.
+
+    Ensures winds, optimal, and aligned are computed once in rule_run and
+    shared verbatim with plotting and saving — no independent recomputation.
+    """
+    # Bracket / beam indices
+    bracket_idx1: int
+    bracket_idx2: int
+    beam_idx1: tuple
+    beam_idx2: tuple
+    # Full bracket datasets
+    ds1: xr.Dataset
+    ds2: xr.Dataset
+    # Composite datasets
+    ds1_comp: xr.Dataset
+    ds2_comp: xr.Dataset
+    # Subsetted datasets for this cloud pair
+    ds1_sub: xr.Dataset
+    ds2_sub: xr.Dataset
+    # Cloud match
+    cl1: int
+    cl2: int
+    cloud_union: Any
+    labels1: Any
+    labels2: Any
+    # Spatial bounds
+    xmin: float
+    xmax: float
+    zmax: float
+    x_idxmin: int
+    x_idxmax: int
+    z_idxmax: int
+    # Cross-correlation result
+    cc_result: CrossCorrelationResult
+    # Winds — computed once from calc_parallel_perpendicular_winds
+    wind_parallel_offset: float
+    mean_wind_parallel: float
+    mean_wind_perpendicular: float
+    transect_wind_parallel: xr.DataArray
+    transect_wind_perpendicular: xr.DataArray
+    # Per-offset fields (vary within the corr_parallel_offset loop)
+    offset: float
+    optimal: bool
+    aligned: bool
+
+
 class CompareDeltaZCandidates(Rule):
     """Use previously identified Delta Z candidates and analyse them together.
 
@@ -721,8 +772,9 @@ class CompareDeltaZCandidates(Rule):
                  z_idxmax) = CompareDeltaZCandidates.subset_fields(cl1, cl2, ds1_comp, ds2_comp, w_plane_hr, labels1, labels2)
                 w_plane_hr_10dBZ = w_plane_hr_sub.values[ds1_sub.rhi_Z > 10]
 
-                (wind_parallel_offset, _, _, _, _) = CompareDeltaZCandidates.calc_parallel_perpendicular_winds(ds1_comp,
-                    ds2_comp, x_idxmin, x_idxmax)
+                (wind_parallel_offset, mean_wind_parallel, mean_wind_perpendicular,
+                 transect_wind_parallel, transect_wind_perpendicular) = (
+                    CompareDeltaZCandidates.calc_parallel_perpendicular_winds(ds1_comp, ds2_comp, x_idxmin, x_idxmax))
                 xmid = (xmax + xmin) / 2
                 aligned = new_beam_idxs[int(round(xmid))] == (beam_idx1, beam_idx2)
 
@@ -731,14 +783,29 @@ class CompareDeltaZCandidates(Rule):
                     optimal = (corr_parallel_offset == cc_result.valid_parallel_offsets[
                         np.argmin(np.abs(cc_result.valid_parallel_offsets - wind_parallel_offset))])
 
-                    figname = CompareDeltaZCandidates.plot_dashboard(outputs, beam_idx1, beam_idx2, bracket_idx1,
-                                                                     bracket_idx2, cc_result, cl1, cl2, cloud_union,
-                                                                     ds1, ds1_comp, ds1_sub, ds2, ds2_comp, ds2_sub,
-                                                                     labels1, labels2, new_beam_idxs,
-                                                                     corr_parallel_offset, xmax, xmin, zmax, x_idxmin,
-                                                                     x_idxmax, z_idxmax)
-                    CompareDeltaZCandidates.save_results(outputs, cc_result, ds1_sub, ds2_sub, corr_parallel_offset,
-                                                         cl1, cl2, optimal, aligned)
+                    ctx = DeltaZCandidateContext(
+                        bracket_idx1=bracket_idx1, bracket_idx2=bracket_idx2,
+                        beam_idx1=beam_idx1, beam_idx2=beam_idx2,
+                        ds1=ds1, ds2=ds2,
+                        ds1_comp=ds1_comp, ds2_comp=ds2_comp,
+                        ds1_sub=ds1_sub, ds2_sub=ds2_sub,
+                        cl1=cl1, cl2=cl2, cloud_union=cloud_union,
+                        labels1=labels1, labels2=labels2,
+                        xmin=xmin, xmax=xmax, zmax=zmax,
+                        x_idxmin=x_idxmin, x_idxmax=x_idxmax, z_idxmax=z_idxmax,
+                        cc_result=cc_result,
+                        wind_parallel_offset=wind_parallel_offset,
+                        mean_wind_parallel=mean_wind_parallel,
+                        mean_wind_perpendicular=mean_wind_perpendicular,
+                        transect_wind_parallel=transect_wind_parallel,
+                        transect_wind_perpendicular=transect_wind_perpendicular,
+                        offset=corr_parallel_offset,
+                        optimal=optimal,
+                        aligned=aligned,
+                    )
+
+                    figname = CompareDeltaZCandidates.plot_dashboard(outputs, ctx)
+                    CompareDeltaZCandidates.save_results(outputs, ctx)
 
                     def get_obj_field(objs, cl, field):
                         obj_cloud_idx = np.where(objs.isel(time=0).cloud_label.values == cl)[0].item()
@@ -968,72 +1035,63 @@ class CompareDeltaZCandidates(Rule):
         return cc_result
 
     @staticmethod
-    def plot_dashboard(outputs, beam_idx1, beam_idx2, bracket_idx1, bracket_idx2, cc_result, cl1, cl2, cloud_union, ds1,
-                       ds1_comp, ds1_sub, ds2, ds2_comp, ds2_sub, labels1, labels2, new_beam_idxs, offset, xmax, xmin,
-                       zmax, x_idxmin, x_idxmax, z_idxmax):
+    def plot_dashboard(outputs, ctx: DeltaZCandidateContext):
         fig, axes = CompareDeltaZCandidates.create_fig_axes()
 
-        u_mean = ds1_comp.radarnet_flow_vec_x.mean().values.item()
-        v_mean = ds1_comp.radarnet_flow_vec_y.mean().values.item()
-        t1 = pd.Timestamp(ds1_comp.time.values.item())
-        t2 = pd.Timestamp(ds2_comp.time.values.item())
+        u_mean = ctx.ds1_comp.radarnet_flow_vec_x.mean().values.item()
+        v_mean = ctx.ds1_comp.radarnet_flow_vec_y.mean().values.item()
+        t1 = pd.Timestamp(ctx.ds1_comp.time.values.item())
+        t2 = pd.Timestamp(ctx.ds2_comp.time.values.item())
 
-        dts = CompareDeltaZCandidates.plot_info(ds1, ds2, t1, t2, u_mean, v_mean, axes)
-        CompareDeltaZCandidates.plot_radarnet_combined(ds1, ds2, axes[0, 3], xmin, xmax)
-        CompareDeltaZCandidates.plot_radarnet(ds1, ds2, xmin, xmax, axes[1, 3], axes[2, 3], beam_idx1, beam_idx2)
+        dts = CompareDeltaZCandidates.plot_info(ctx.ds1, ctx.ds2, t1, t2, u_mean, v_mean, axes)
+        CompareDeltaZCandidates.plot_radarnet_combined(ctx.ds1, ctx.ds2, axes[0, 3], ctx.xmin, ctx.xmax)
+        CompareDeltaZCandidates.plot_radarnet(ctx.ds1, ctx.ds2, ctx.xmin, ctx.xmax, axes[1, 3], axes[2, 3],
+                                              ctx.beam_idx1, ctx.beam_idx2)
 
-        CompareDeltaZCandidates.plot_composites(ds1_comp, ds2_comp, xmin, xmax, zmax, axes[1:3, 0])
-        CompareDeltaZCandidates.plot_composites_for_match(ds1_sub, ds2_sub, cc_result.Z1, cc_result.Z2, cl1, cl2,
-                                                          cloud_union, x_idxmax, x_idxmin, z_idxmax, labels1, labels2,
-                                                          axes[:3, 1])
-        offset_vec = (0, offset)
-        CompareDeltaZCandidates.plot_dZ(ds1_sub, ds2_sub, cc_result.Z1, cc_result.Z2, offset_vec, axes[:, 2])
+        CompareDeltaZCandidates.plot_composites(ctx.ds1_comp, ctx.ds2_comp, ctx.xmin, ctx.xmax, ctx.zmax, axes[1:3, 0])
+        CompareDeltaZCandidates.plot_composites_for_match(ctx.ds1_sub, ctx.ds2_sub, ctx.cc_result.Z1, ctx.cc_result.Z2,
+                                                          ctx.cl1, ctx.cl2, ctx.cloud_union, ctx.x_idxmax, ctx.x_idxmin,
+                                                          ctx.z_idxmax, ctx.labels1, ctx.labels2, axes[:3, 1])
+        CompareDeltaZCandidates.plot_dZ(ctx.ds1_sub, ctx.ds2_sub, ctx.cc_result.Z1, ctx.cc_result.Z2,
+                                        (0, ctx.offset), axes[:, 2])
 
-        (est_offset, mean_wind_parallel, mean_wind_perpendicular, transect_wind_parallel,
-         transect_wind_perpendicular) = CompareDeltaZCandidates.calc_parallel_perpendicular_winds(ds1_comp, ds2_comp,
-                                                                                                  x_idxmin, x_idxmax)
-
-        xmid = (xmax + xmin) / 2
-        aligned = new_beam_idxs[int(round(xmid))] == (beam_idx1, beam_idx2)
-
-        if offset == cc_result.valid_parallel_offsets[np.argmin(np.abs(cc_result.valid_parallel_offsets - est_offset))]:
-            optimal = True
-        else:
-            optimal = False
-        logger.debug(f'optimal: {optimal}')
-        CompareDeltaZCandidates.plot_cross_corr(cc_result, offset, optimal, axes[3, 0])
+        logger.debug(f'optimal: {ctx.optimal}')
+        CompareDeltaZCandidates.plot_cross_corr(ctx.cc_result, ctx.offset, ctx.optimal, axes[3, 0])
 
         ax = axes[3, 1]
-        ax.set_title(
-            f'par={mean_wind_parallel:.2f}, perp={mean_wind_perpendicular:.2f} [m/s], est x-offset={est_offset:.2f}')
-        ax.plot(ds1_comp.x.values, transect_wind_parallel)
-        ax.plot(ds1_comp.x.values, transect_wind_perpendicular)
-        ax.set_xlim(xmin, xmax)
+        ax.set_title(f'par={ctx.mean_wind_parallel:.2f}, perp={ctx.mean_wind_perpendicular:.2f} [m/s],'
+                     f' est x-offset={ctx.wind_parallel_offset:.2f}')
+        ax.plot(ctx.ds1_comp.x.values, ctx.transect_wind_parallel)
+        ax.plot(ctx.ds1_comp.x.values, ctx.transect_wind_perpendicular)
+        ax.set_xlim(ctx.xmin, ctx.xmax)
 
-        fname = (f'dashboard.{bracket_idx1}_{bracket_idx2}.'
+        offset, optimal, aligned = ctx.offset, ctx.optimal, ctx.aligned
+        fname = (f'dashboard.{ctx.bracket_idx1}_{ctx.bracket_idx2}.'
                  f'{t1:%Y-%m-%d_%H%M%S}_{t2:%Y-%m-%d_%H%M%S}.'
-                 f'{cl1}_{cl2}.'
+                 f'{ctx.cl1}_{ctx.cl2}.'
                  f'{offset=}.{optimal=}.{aligned=}.'
-                 f'a1={beam_idx1}.a2={beam_idx2}.png'.replace(' ', ''))
+                 f'a1={ctx.beam_idx1}.a2={ctx.beam_idx2}.png'.replace(' ', ''))
         logger.debug(fname)
         figdir = outputs['dZ_stats'].parent
         plt.savefig(figdir / fname)
         return figdir / fname
 
     @staticmethod
-    def save_results(outputs, cc_result, ds1_sub, ds2_sub, offset, cl1, cl2, optimal, aligned):
+    def save_results(outputs, ctx: DeltaZCandidateContext):
         """Construct and populate a large xr.Dataset before saving it to .nc
 
         .nc files have aligned (i.e. are the individual beams that make up a bracket correctly aligned given
         perpendicular wind) and optimal (i.e. does the correlation peak match the parallel wind) in their file names.
         .nc files are easily concat-able.
         """
-        # Construct a unique comparison ID string for this specific output
-        comparison_id_str = f"cl{cl1}_cl{cl2}_offset{offset}"
+        offset, optimal, aligned = ctx.offset, ctx.optimal, ctx.aligned
+        cl1, cl2 = ctx.cl1, ctx.cl2
+        cc_result, ds1_sub, ds2_sub = ctx.cc_result, ctx.ds1_sub, ctx.ds2_sub
 
+        comparison_id_str = f"cl{cl1}_cl{cl2}_offset{offset}"
         output_path = outputs['dZ_stats'].parent / f"deltaZ_comparison.cl{cl1}_cl{cl2}.{offset=}.{optimal=}.{aligned=}.nc"
 
-        ds_out = xr.Dataset(coords=dict(comparison_id=[comparison_id_str],  # Use the unique string as coordinate value
+        ds_out = xr.Dataset(coords=dict(comparison_id=[comparison_id_str],
             x=ds1_sub.x, z=ds1_sub.z, cc_len=np.arange(len(cc_result.ccidx)),
             peak_len=np.arange(len(cc_result.peaks)), ),
             data_vars=dict(optimal=(("comparison_id",), [optimal]), aligned=(("comparison_id",), [aligned]),
@@ -1086,7 +1144,7 @@ class CompareDeltaZCandidates(Rule):
         az1s_str = '(' + ', '.join([f'{v:.2f}' for v in az1s]) + ')'
         az2s_str = '(' + ', '.join([f'{v:.2f}' for v in az2s]) + ')'
         wind_angle_to = np.arctan2(u_mean, v_mean) * 180 / np.pi
-        wind_angle_from = wind_angle_to + 180 % (360)
+        wind_angle_from = (wind_angle_to + 180) % 360
         msg = rf'''s1: {t1:%Y-%m-%d %H:%M:%S}, {az1:.2f}$\degree$ {az1s_str}
 s2: {t2:%Y-%m-%d %H:%M:%S}, {az2:.2f}$\degree$ {az2s_str}
 dt: {dts:.2f}s
@@ -1145,7 +1203,7 @@ wind angle from: {wind_angle_from:.2f}$\degree$'''
                 ys = np.linspace(xmin, xmax, 2) * np.cos(az * np.pi / 180)
                 ax.plot(xs, ys, color=c, ls='-', lw=3)
                 ax.plot(xs, ys, color=c, marker='x', ls='', lw=3)
-        az_mean = np.mean([ds1.rhi_mean_az.values.mean(), ds1.rhi_mean_az.values.mean()])
+        az_mean = np.mean([ds1.rhi_mean_az.values.mean(), ds2.rhi_mean_az.values.mean()])
         xmid = (xmin + xmax) / 2
         dx = xmax - xmin
         # xcentre = CHIL_X / 1e3 + xmid * np.sin(az_mean * np.pi / 180)
@@ -1230,7 +1288,7 @@ wind angle from: {wind_angle_from:.2f}$\degree$'''
             ax.plot(xs, ys, 'k-', lw=3)
             ax.plot(xs, ys, 'kx', lw=3)
 
-        az_mean = np.mean([ds1.rhi_mean_az.values.mean(), ds1.rhi_mean_az.values.mean()])
+        az_mean = np.mean([ds1.rhi_mean_az.values.mean(), ds2.rhi_mean_az.values.mean()])
         # km to m.
         # xmin *= 1e3
         # xmax *= 1e3
@@ -1381,7 +1439,11 @@ class MatchRHIsToStorms(Rule):
         df_storms = pd.read_hdf(path, key='storm_data')
         ds_storms['rain'] = da
 
-        df = pd.read_hdf(inputs['gathered_dZ_stats'], key='gathered_dZ_stats')
+        try:
+            df = pd.read_hdf(inputs['gathered_dZ_stats'], key='gathered_dZ_stats')
+        except FileNotFoundError as e:
+            logger.error('Cannot find gathered stats: you probably need to do a full rerun to generate this')
+            raise
         # Only keep optimal along beam and aligned across beam.
         df_dZ_stats = df[df.optimal_parallel_offset & df.aligned_perp_offset]
         return df_candidate_scans, df_dZ_stats, df_storms, ds_storms
@@ -1435,7 +1497,7 @@ def annotate_fit_with_line(x, y, **kws):
     mask = x.notna() & y.notna()
     x_clean, y_clean = x[mask], y[mask]
 
-    if len(x_clean) > 1:
+    if len(x_clean) > 1 and x_clean.nunique() > 1:
         # Calculate linear regression
         slope, intercept, r, p, stderr = spstats.linregress(x_clean, y_clean)
 
