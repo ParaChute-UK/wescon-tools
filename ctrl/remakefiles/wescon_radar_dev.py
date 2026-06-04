@@ -46,6 +46,12 @@ CHIL_Y = 138620
 LYN_X = 400064
 LYN_Y = 178939
 
+# RadarNet optical-flow timestep (one scan cycle = 5 minutes).
+RADARNET_TIMESTEP_S = 300
+
+# Batch size for CasePathsMap file grouping.
+CPMAP_BATCH_SIZE = 10
+
 # Mapping between internal (to this remakefile) name and as it is in datasets.
 FIELD_NAME_MAP = {'camra': {'Z': 'DBZ_H', 'VEL': 'VEL_HV', }, 'kepler': {'Z': 'DBZ', 'VEL': 'VEL', }, }
 
@@ -86,7 +92,7 @@ class CasePathsMap:
     pathglob = {'kepler': 'ncas-mobile-ka-band-radar-1_lyneham_2023????-??????_rhi_l1_v1.0.0.nc',
         'camra': 'ncas-radar-camra-1_cao_2023????-??????_rhi_l1_v1.0.0.nc', }
 
-    def __init__(self, batch=10):
+    def __init__(self, batch=CPMAP_BATCH_SIZE):
         self.batch = batch
         self.batched_paths = {}
 
@@ -103,7 +109,7 @@ class CasePathsMap:
         return paths
 
 
-cpmap = CasePathsMap(10)
+cpmap = CasePathsMap(CPMAP_BATCH_SIZE)
 
 
 class RegridCAMRaKeplerL1(Rule):
@@ -204,12 +210,11 @@ class RegridCAMRaKeplerL1(Rule):
     @staticmethod
     def flow_interp_radarnet(da_rain, time):
         rain_times = pd.DatetimeIndex(da_rain.time)
-        # N.B. 300 s == 5 min
         if time.minute % 5 == 0 and time.second == 0 and time.microsecond == 0:
             # This happened exactly once. Pick time and next time.
-            isel_time = (rain_times == time) | (rain_times == time + pd.Timedelta(seconds=300))
+            isel_time = (rain_times == time) | (rain_times == time + pd.Timedelta(seconds=RADARNET_TIMESTEP_S))
         else:
-            isel_time = np.abs((rain_times - time).to_series().dt.total_seconds().values) < 300
+            isel_time = np.abs((rain_times - time).to_series().dt.total_seconds().values) < RADARNET_TIMESTEP_S
         da_rain_either_side = da_rain.isel(time=isel_time)
         fi = FlowInterp(da_rain_either_side[0].values, da_rain_either_side[1].values, stride=10, max_flow_speed=15)
         if time.minute % 5 == 0 and time.second == 0:
@@ -218,7 +223,7 @@ class RegridCAMRaKeplerL1(Rule):
             interped_rain = da_rain.sel(time=time, method='nearest')
         else:
             # 5-min timestep.
-            frac = ((time.minute * 60 + time.second) % 300) / 300
+            frac = ((time.minute * 60 + time.second) % RADARNET_TIMESTEP_S) / RADARNET_TIMESTEP_S
             interped_rain = fi.interp(frac)
         return fi, interped_rain
 
@@ -270,8 +275,8 @@ def plot_radarnet_rhi_transect(ds, radar):
     transect_v = ds.radarnet_flow_vec_y[::5, ::5].interp(eastings=transect_x, northings=transect_y)
     ax3.plot(transect_dist / 1e3, transect_rain)
     ax4 = ax3.twinx()
-    ax4.plot(transect_dist / 1e3, transect_u * 1e3 / 300, 'r--')
-    ax4.plot(transect_dist / 1e3, transect_v * 1e3 / 300, 'g--')
+    ax4.plot(transect_dist / 1e3, transect_u * 1e3 / RADARNET_TIMESTEP_S, 'r--')
+    ax4.plot(transect_dist / 1e3, transect_v * 1e3 / RADARNET_TIMESTEP_S, 'g--')
     ax4.set_ylim(-10, 10)
 
 
@@ -935,9 +940,9 @@ class CompareDeltaZCandidates(Rule):
         transect_x = xr.DataArray(transect_dist * np.sin(az_mean * np.pi / 180) + CHIL_X, dims='transect')
         transect_y = xr.DataArray(transect_dist * np.cos(az_mean * np.pi / 180) + CHIL_Y, dims='transect')
 
-        # Convert from km to m (1000), and from 5 min to s (/300)
-        transect_u = ds1_comp.radarnet_flow_vec_x.interp(eastings=transect_x, northings=transect_y) * 1000 / 300
-        transect_v = ds1_comp.radarnet_flow_vec_y.interp(eastings=transect_x, northings=transect_y) * 1000 / 300
+        # Convert from km to m (1000), and from 5 min to s (/RADARNET_TIMESTEP_S)
+        transect_u = ds1_comp.radarnet_flow_vec_x.interp(eastings=transect_x, northings=transect_y) * 1000 / RADARNET_TIMESTEP_S
+        transect_v = ds1_comp.radarnet_flow_vec_y.interp(eastings=transect_x, northings=transect_y) * 1000 / RADARNET_TIMESTEP_S
         transect_wind_parallel = transect_u * np.sin(az_mean * np.pi / 180) + transect_v * np.cos(az_mean * np.pi / 180)
         transect_wind_perpendicular = - transect_u * np.cos(az_mean * np.pi / 180) + transect_v * np.sin(
             az_mean * np.pi / 180)
@@ -1145,7 +1150,7 @@ class CompareDeltaZCandidates(Rule):
 
     @staticmethod
     def plot_cross_corr(cc_result, offset, optimal_offset, ax):
-        ax.set_title(f'cross corr: x-offset={offset} (={offset * 75}m)')
+        ax.set_title(f'cross corr: x-offset={offset} (={offset * compare_settings.camra_resolution}m)')
         ax.plot(cc_result.ccidx, cc_result.ccplot)
         ax.axhline(y=cc_result.percentiles['p95'], color='k', ls='-.')
         ax.axhline(y=cc_result.percentiles['p98'], color='k', ls='--')
