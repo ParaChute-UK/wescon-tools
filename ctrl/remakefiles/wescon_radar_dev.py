@@ -775,7 +775,7 @@ class CompareDeltaZCandidates(Rule):
             plotter.plot()
             figdir = outputs['dZ_stats'].parent
             figpath = figdir / f'3d_winds_{perp_offset}.png'
-            print(figpath)
+            logger.debug(figpath)
             plt.savefig(figpath)
 
             for cl1, cl2 in matches:
@@ -1369,7 +1369,7 @@ class GatherDeltaZStats(Rule):
         outfile = outputs['gathered_dZ_stats']
         stats_hdfs = list(inputs.values())
         df = pd.concat([pd.read_hdf(h) for h in stats_hdfs], ignore_index=True)
-        print(df)
+        logger.debug(df)
         df.to_hdf(outfile, key='gathered_dZ_stats')
 
 
@@ -1449,12 +1449,12 @@ class MatchRHIsToStorms(Rule):
                     **{f'storm_idx{j + 1}': MatchRHIsToStorms.storm_label_to_idx(df_storms, storm_time, unique_storm_labels[j])
                        for j in range(len(unique_storm_labels))},
                 })
-                print(df_data[-1])
+                logger.debug(df_data[-1])
 
                 # MatchRHIsToStorms.plot_rhi_storm_intersections(ds_storms.rain, ds_sub, i, figdir, scan_idx, storm_labels, time,
                 #                                                transect_x, transect_y, unique_storm_labels, xmax, xmin)
         df_rhi_storm_stats = pd.DataFrame(df_data)
-        print(df_rhi_storm_stats)
+        logger.debug(df_rhi_storm_stats)
         df_rhi_storm_stats.to_hdf(outputs['match_rhi_storm_stats'], key='match_rhi_storm_stats')
 
     @staticmethod
@@ -1582,7 +1582,7 @@ class AnalyseMatchRHIsToStorms(Rule):
 
     @staticmethod
     def rule_run(inputs, outputs, case):
-        print(case)
+        logger.debug(case)
         analysis_stats = []
         for tracking_precip_thresh in [1., 3., 5.]:
             df_candidate_scans, df_dZ_stats, df_storms, ds_storms = MatchRHIsToStorms.load_data(case, inputs,
