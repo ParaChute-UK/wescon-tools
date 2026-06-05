@@ -77,8 +77,14 @@ class Settings:
 settings = Settings()
 
 # Check changes using new DeltaZCandidateContext dataclass.
-# Compare against v8.
-output_vn = 'v9'
+# v7: version run earlier in 2026 using the MCS:PRIME GWS.
+# v8: version in which I just got everything running again against the new dirs.
+# v10: version in I refactored some code and split up some functions.
+# 5/6/2026: v10 compares identically to v7 for output of CompareDeltaZCandidates (most complex logic and where the
+# bulk of the refactoring was done).
+# Likewise, v10 is identical to v7 for the rhi_storm_match plots. These are essentially an end-to-end test of the whole
+# pipeline, meaning I've got extremely high confidence that the changes did not change anything.
+output_vn = 'v10'
 
 slurm_config = {'account': 'afesp', 'partition': 'standard', 'qos': 'short', 'mem': 64000, 'exclude': 'host1117'}
 rmk = Remake(config=dict(slurm=slurm_config))
@@ -755,31 +761,44 @@ class CompareDeltaZCandidates(Rule):
 
     @staticmethod
     def rule_run(inputs, outputs, case, bracket_idx1, bracket_idx2):
-        # TODO: save just what's nec to reproduce figs.
         ds1, ds2 = CompareDeltaZCandidates.load_data(bracket_idx1, bracket_idx2, inputs)
+        # This will calculate *all* offsets over the length of the beam, taking into account a given wind close to the
+        # radar will shift the 4 beams in each bracket relative to the next bracket by a greater degree than far from
+        # the radar.
         new_beam_idxs, perp_offsets = CompareDeltaZCandidates.find_all_beam_alignment(ds1, ds2)
 
         dZ_stats = []
+        # Loop over all offsets. This will mean that, for a given pair of clouds in the two composites, the subset
+        # of four beams will either be aligned or not aligned. This is wasteful, because you are calculating the
+        # full set of analysis even when not aligned, but I was not smart enough to figure out how to just do for
+        # aligned. See beams_aligned below.
         for perp_offset in set(perp_offsets.values()):
+            # Subset the beams based on the offset.
             s1, s2 = sliding_offset_to_slices(perp_offset)
             beam_idx1 = tuple(np.arange(4)[s1])
             beam_idx2 = tuple(np.arange(4)[s2])
-
             ds1_comp, ds2_comp = CompareDeltaZCandidates.create_composites(ds1, ds2, list(beam_idx1), list(beam_idx2))
+
+            # Go through and find the coherent objects in each composite RHI.
             labels1, labels2, objs1, objs2 = CompareDeltaZCandidates.find_coherent_objects(ds1_comp, ds2_comp)
+
+            # Find the overlaps between the two composite RHIs.
             matches = CompareDeltaZCandidates.find_overlapping_cloud_matches(labels1, labels2, objs1, objs2)
+
+            # Perform matching to 3D winds.
             matcher = MatchRHIto3dWinds(ds1_comp, time_interp=False)
             matcher.match()
             w_plane_hr = matcher.w_plane_hr
             plotter = Plot3dWinds(matcher)
             plotter.plot()
+
             figdir = outputs['dZ_stats'].parent
             figpath = figdir / f'3d_winds_{perp_offset}.png'
             logger.debug(figpath)
             plt.savefig(figpath)
 
             for cl1, cl2 in matches:
-                dZ_stats.extend(CompareDeltaZCandidates._process_cloud_match(
+                dZ_stats.extend(CompareDeltaZCandidates.process_cloud_match(
                     cl1, cl2, ds1, ds2, ds1_comp, ds2_comp, w_plane_hr,
                     labels1, labels2, objs1, objs2,
                     new_beam_idxs, beam_idx1, beam_idx2,
@@ -790,31 +809,39 @@ class CompareDeltaZCandidates(Rule):
         df_dZ_stats.to_hdf(outputs['dZ_stats'], key='dZ_stats')
 
     @staticmethod
-    def _process_cloud_match(cl1, cl2, ds1, ds2, ds1_comp, ds2_comp, w_plane_hr,
-                             labels1, labels2, objs1, objs2,
-                             new_beam_idxs, beam_idx1, beam_idx2,
-                             bracket_idx1, bracket_idx2, perp_offset, outputs, case):
+    def process_cloud_match(cl1, cl2, ds1, ds2, ds1_comp, ds2_comp, w_plane_hr,
+                            labels1, labels2, objs1, objs2,
+                            new_beam_idxs, beam_idx1, beam_idx2,
+                            bracket_idx1, bracket_idx2, perp_offset, outputs, case):
         """Process one cloud pair across all valid parallel offsets.
 
         Returns a list of stats dicts, one per corr_parallel_offset.
         """
+        # Use info from both composites to subset fields based on where the overlapping clouds are.
         (ds1_sub, ds2_sub, w_plane_hr_sub, cloud_union, xmin, xmax, zmax, x_idxmin, x_idxmax,
          z_idxmax) = CompareDeltaZCandidates.subset_fields(cl1, cl2, ds1_comp, ds2_comp, w_plane_hr, labels1, labels2)
         w_plane_hr_10dBZ = w_plane_hr_sub.values[ds1_sub.rhi_Z > 10]
 
+        # Calc the parallel/perpendicular winds from the flow-derived winds.
         (wind_parallel_offset, mean_wind_parallel, mean_wind_perpendicular,
          transect_wind_parallel, transect_wind_perpendicular) = (
             CompareDeltaZCandidates.calc_parallel_perpendicular_winds(ds1_comp, ds2_comp, x_idxmin, x_idxmax))
         xmid = (xmax + xmin) / 2
+        # beams_aligned: Work out whether the beams are aligned for these objects.
         aligned = new_beam_idxs[int(round(xmid))] == (beam_idx1, beam_idx2)
 
+        # Calculate the cross correlation between the two composite, subset RHIs.
         cc_result = CompareDeltaZCandidates.calc_cross_correlation(ds1_sub.rhi_Z, ds2_sub.rhi_Z)
 
+        # The cross corr will produce a number of valid offsets (peaks above threshold). Loop over these, and flag
+        # the one closest to the wind-predicted offset as "optimal".
+        # TODO: SCI: smarter ways of calcing optimal: eg including info from flow-derived winds and how strong corr is.
         stats = []
         for corr_parallel_offset in cc_result.valid_parallel_offsets:
             optimal = (corr_parallel_offset == cc_result.valid_parallel_offsets[
                 np.argmin(np.abs(cc_result.valid_parallel_offsets - wind_parallel_offset))])
 
+            # Make a massive context obj to save having lots of arguments for functions.
             ctx = DeltaZCandidateContext(
                 bracket_idx1=bracket_idx1, bracket_idx2=bracket_idx2,
                 beam_idx1=beam_idx1, beam_idx2=beam_idx2,
@@ -943,6 +970,12 @@ class CompareDeltaZCandidates(Rule):
         # Convert from km to m (1000), and from 5 min to s (/RADARNET_TIMESTEP_S)
         transect_u = ds1_comp.radarnet_flow_vec_x.interp(eastings=transect_x, northings=transect_y) * 1000 / RADARNET_TIMESTEP_S
         transect_v = ds1_comp.radarnet_flow_vec_y.interp(eastings=transect_x, northings=transect_y) * 1000 / RADARNET_TIMESTEP_S
+        # transect_wind_parallel and transect_wind_perpendicular are defined as follows.
+        # transect_wind_parallel forms an x-axis, and transect_wind_perpendicular is the y-axis (90deg anticlockwise rot).
+        # This means that for a u wind of +10 m/s, v of 0 (westerly), and a beam az azimuth 0 (pointing north), the parallel
+        # component is 0, and the perpendicular is -10 m/s.
+        # This means that for a u wind of 0, v of 10 m/s (southerly), and a beam az azimuth 0 (pointing north), the parallel
+        # component is 10 m/s, and the perpendicular is 0.
         transect_wind_parallel = transect_u * np.sin(az_mean * np.pi / 180) + transect_v * np.cos(az_mean * np.pi / 180)
         transect_wind_perpendicular = - transect_u * np.cos(az_mean * np.pi / 180) + transect_v * np.sin(
             az_mean * np.pi / 180)
@@ -950,6 +983,7 @@ class CompareDeltaZCandidates(Rule):
         mean_wind_perpendicular = transect_wind_perpendicular.isel(
             transect=slice(x_idxmin, x_idxmax)).mean().values.item()
 
+        # -ve because it's an offset: positive wind means ds2 cloud is farther from radar - correction shifts it back.
         wind_parallel_offset = -mean_wind_parallel * dts / compare_settings.camra_resolution
         return wind_parallel_offset, mean_wind_parallel, mean_wind_perpendicular, transect_wind_parallel, transect_wind_perpendicular
 
@@ -990,8 +1024,8 @@ class CompareDeltaZCandidates(Rule):
         """Subset the fields based on the current objects (in labels1/2)
 
         * Calculate the union (as in set union) between the 2 objects and use to calculate e.g. xmin, xmax
-        *of both objects*.
-        * Use the parallel winds to calculate the estimated (parallel) offset.
+          of both objects.
+        * Pad the index bounds and slice ds1_comp, ds2_comp, and w_plane_hr to that domain.
         """
         # Find the union of both coherent objs.
         cloud_union = (labels1 == cl1) | (labels2 == cl2)
