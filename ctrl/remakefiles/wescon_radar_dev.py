@@ -14,30 +14,30 @@ Handles CAMRa and Kepler radar data, located at Chilbolton and Lyneham respectiv
 Contact: mark.muetzelfeldt@reading.ac.uk
 """
 from dataclasses import dataclass
-from typing import Any
 from itertools import batched, product
+from typing import Any
 
 import cartopy.crs as ccrs
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import scipy.stats as spstats
+import seaborn as sns
 import xarray as xr
 from loguru import logger
 from matplotlib import patches
 from scipy.signal import find_peaks
-import scipy.stats as spstats
-import seaborn as sns
 
-from wescon_tools import proj_config as conf
 from remake import Remake, Rule
 from simple_track.nimrod_user_functions import FileLoader
+from wescon_tools import proj_config as conf
 from wescon_tools.custom_osgb import CustomOSGB
 from wescon_tools.flow_interp import FlowInterp
+from wescon_tools.match_rhi_to_3d_winds import MatchRHIto3dWinds, Plot3dWinds
 from wescon_tools.radar_intersection import RadarIntersectionCalculator, RadarIntersection
 from wescon_tools.radar_util import add_cartesian_coords, RadarRegridder, xr_find_cloud_objects
 from wescon_tools.util import to_netcdf_tmp_then_copy
-from wescon_tools.match_rhi_to_3d_winds import MatchRHIto3dWinds, Plot3dWinds
 
 # Coords of Chilbolton in eastings/northings
 CHIL_X = 439285
@@ -76,17 +76,18 @@ class Settings:
 
 settings = Settings()
 
-# Check changes using new DeltaZCandidateContext dataclass.
-# v7: version run earlier in 2026 using the MCS:PRIME GWS.
-# v8: version in which I just got everything running again against the new dirs.
-# v10: version in I refactored some code and split up some functions.
 # 5/6/2026: v10 compares identically to v7 for output of CompareDeltaZCandidates (most complex logic and where the
 # bulk of the refactoring was done).
 # Likewise, v10 is identical to v7 for the rhi_storm_match plots. These are essentially an end-to-end test of the whole
 # pipeline, meaning I've got extremely high confidence that the changes did not change anything.
-output_vn = 'v10'
+# v7: version run earlier in 2026 using the MCS:PRIME GWS.
+# v8: version in which I just got everything running again against the new dirs.
+# v10: version in I refactored some code and split up some functions.
+# v11: bugfixes for edge cases found when running against all IOPs (empty dfs).
+# v12: try to get things running. Messed up dirs so that figs ended up in data dirs.
+output_vn = 'v13'
 
-slurm_config = {'account': 'afesp', 'partition': 'standard', 'qos': 'short', 'mem': 64000, 'exclude': 'host1117'}
+slurm_config = {'account': 'afesp', 'partition': 'standard', 'qos': 'short', 'mem': 100000, 'exclude': 'host1117'}
 rmk = Remake(config=dict(slurm=slurm_config))
 
 
@@ -136,14 +137,17 @@ class RegridCAMRaKeplerL1(Rule):
     @staticmethod
     def rule_inputs(case, radar, batch_idx):
         paths = cpmap(case, radar)[batch_idx]
-        return {**{'radar_paths': paths}, **{'radarnet': conf.PATHS[
-                                                             'datadir'] / f'radarnet/{case[:4]}/{case[4:6]}/{case[6:8]}/metoffice-c-band-rain-radar_uk_{case}.nc'}, }
+        return {
+            **{'radar_paths': paths},
+            **{'radarnet': (
+                    conf.PATHS['datadir'] /
+                    f'radarnet/{case[:4]}/{case[4:6]}/{case[6:8]}/metoffice-c-band-rain-radar_uk_{case}.nc')},
+        }
 
     @staticmethod
     def rule_outputs(case, radar, batch_idx):
         paths = cpmap(case, radar)[batch_idx]
-        return {f'gridded_data{i}': conf.PATHS[
-                                        'outdir'] / 'wescon_radar_dev' / output_vn / case / radar / f'gridded_{path.stem}.nc'
+        return {f'gridded_data{i}': conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / case / radar / f'gridded_{path.stem}.nc'
                 for i, path in enumerate(paths)}
 
     @staticmethod
@@ -379,7 +383,7 @@ class FindCamraKeplerMatch(Rule):
     @staticmethod
     def rule_outputs(case):
         return {'camra_kepler_match': conf.PATHS[
-                                          'figdir'] / f'wescon_radar_dev/{output_vn}/{case}/camra_kepler_match_{case}.hdf'}
+                                          'outdir'] / f'wescon_radar_dev/{output_vn}/{case}/camra_kepler_match_{case}.hdf'}
 
     @staticmethod
     def rule_run(inputs, outputs, case):
@@ -755,9 +759,12 @@ class CompareDeltaZCandidates(Rule):
 
     @staticmethod
     def rule_outputs(case, bracket_idx1, bracket_idx2):
-        outdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
+        outdir = conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
+        figdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
         return {
-            f'dZ_stats': outdir / 'comparison' / f'{case}_{bracket_idx1}_{bracket_idx2}' / f'dZ_stats.hdf', }
+            f'dZ_stats': outdir / 'comparison' / f'{case}_{bracket_idx1}_{bracket_idx2}' / f'dZ_stats.hdf',
+            f'fig_dummy': figdir / 'comparison' / f'{case}_{bracket_idx1}_{bracket_idx2}' / f'fig_dummy.out',
+        }
 
     @staticmethod
     def rule_run(inputs, outputs, case, bracket_idx1, bracket_idx2):
@@ -792,7 +799,7 @@ class CompareDeltaZCandidates(Rule):
             plotter = Plot3dWinds(matcher)
             plotter.plot()
 
-            figdir = outputs['dZ_stats'].parent
+            figdir = outputs['fig_dummy'].parent
             figpath = figdir / f'3d_winds_{perp_offset}.png'
             logger.debug(figpath)
             plt.savefig(figpath)
@@ -807,6 +814,7 @@ class CompareDeltaZCandidates(Rule):
 
         df_dZ_stats = pd.DataFrame(dZ_stats)
         df_dZ_stats.to_hdf(outputs['dZ_stats'], key='dZ_stats')
+        outputs['fig_dummy'].touch()
 
     @staticmethod
     def process_cloud_match(cl1, cl2, ds1, ds2, ds1_comp, ds2_comp, w_plane_hr,
@@ -1138,8 +1146,9 @@ class CompareDeltaZCandidates(Rule):
                  f'{offset=}.{optimal=}.{aligned=}.'
                  f'a1={ctx.beam_idx1}.a2={ctx.beam_idx2}.png'.replace(' ', ''))
         logger.debug(fname)
-        figdir = outputs['dZ_stats'].parent
+        figdir = outputs['fig_dummy'].parent
         plt.savefig(figdir / fname)
+        outputs['fig_dummy'].touch()
         return figdir / fname
 
     @staticmethod
@@ -1395,14 +1404,16 @@ class GatherDeltaZStats(Rule):
 
     @staticmethod
     def rule_outputs(case):
-        outdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
+        outdir = conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
         return {'gathered_dZ_stats': outdir / 'comparison' / 'gathered_dZ_stats.hdf'}
 
     @staticmethod
     def rule_run(inputs, outputs, case):
         outfile = outputs['gathered_dZ_stats']
         stats_hdfs = list(inputs.values())
-        df = pd.concat([pd.read_hdf(h) for h in stats_hdfs], ignore_index=True)
+        dfs = [pd.read_hdf(h) for h in stats_hdfs]
+        dfs = [d for d in dfs if not d.empty]
+        df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
         logger.debug(df)
         df.to_hdf(outfile, key='gathered_dZ_stats')
 
@@ -1423,7 +1434,7 @@ class MatchRHIsToStorms(Rule):
 
     @staticmethod
     def rule_outputs(case, tracking_precip_thresh, dZ_stats_filters):
-        outdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
+        outdir = conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
         return {'match_rhi_storm_stats': (outdir / 'rhi_storm_match' /
                                           f'tracking_precip_thresh_{tracking_precip_thresh}' /
                                           f'match_rhi_storm_stats.{dZ_stats_filters}.hdf')}
@@ -1436,12 +1447,13 @@ class MatchRHIsToStorms(Rule):
 
     @staticmethod
     def rule_run(inputs, outputs, case, tracking_precip_thresh, dZ_stats_filters):
-        figdir = outputs['match_rhi_storm_stats'].parent
+        # figdir = outputs['match_rhi_storm_stats'].parent
         df_candidate_scans, df_dZ_stats, df_storms, ds_storms = MatchRHIsToStorms.load_data(case, inputs, tracking_precip_thresh)
         if dZ_stats_filters == 'all_cloud':
             pass
         elif dZ_stats_filters == 'high_cloud':
-            df_dZ_stats = df_dZ_stats[df_dZ_stats.o1_cloud_max_z > 4]
+            if not df_dZ_stats.empty:
+                df_dZ_stats = df_dZ_stats[df_dZ_stats.o1_cloud_max_z > 4]
 
         df_data = []
 
@@ -1517,7 +1529,10 @@ class MatchRHIsToStorms(Rule):
             logger.error('Cannot find gathered stats: you probably need to do a full rerun to generate this')
             raise
         # Only keep optimal along beam and aligned across beam.
-        df_dZ_stats = df[df.optimal_parallel_offset & df.aligned_perp_offset]
+        if df.empty:
+            df_dZ_stats = df
+        else:
+            df_dZ_stats = df[df.optimal_parallel_offset & df.aligned_perp_offset]
         return df_candidate_scans, df_dZ_stats, df_storms, ds_storms
 
     @staticmethod
@@ -1609,10 +1624,13 @@ class AnalyseMatchRHIsToStorms(Rule):
 
     @staticmethod
     def rule_outputs(case):
-        outdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
-        return {'analyse_match_rhi_storm_stats': (outdir / 'rhi_storm_match' /
-                                                  f'tracking_precip_thresh' /
-                                                  f'analyse_match_rhi_storm_stats.hdf')}
+        outdir = conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
+        figdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
+        return {
+            'analyse_match_rhi_storm_stats': (outdir / 'rhi_storm_match' / f'tracking_precip_thresh' /
+                                              f'analyse_match_rhi_storm_stats.hdf'),
+            'fig_dummy': (figdir / 'rhi_storm_match' / f'tracking_precip_thresh' / f'fig_dummy.out'),
+        }
 
     @staticmethod
     def rule_run(inputs, outputs, case):
@@ -1631,6 +1649,12 @@ class AnalyseMatchRHIsToStorms(Rule):
                                                                analysis_stats)
 
         df_analysis_matches_full = pd.DataFrame(analysis_stats)
+
+        if df_analysis_matches_full.empty:
+            logger.warning(f'No analysis matches found for {case} — skipping plots')
+            pd.DataFrame().to_hdf(outputs['analyse_match_rhi_storm_stats'], key='analyse_match_rhi_storm_stats')
+            outputs['fig_dummy'].touch()
+            return
 
         for tracking_precip_thresh, dZ_stats_filters in product([1., 3., 5.], ['all_cloud', 'high_cloud']):
             key = f'{tracking_precip_thresh}_{dZ_stats_filters}'
@@ -1651,8 +1675,9 @@ class AnalyseMatchRHIsToStorms(Rule):
             if ax == axes[0]:
                 ax.set_ylabel('deltaZ_mean_20dBZ')
 
-        figdir = outputs['analyse_match_rhi_storm_stats'].parent
+        figdir = outputs['fig_dummy'].parent
         figpath = figdir / f'analysis_match_rhi_storm_stats.corr.area.deltaZ_mean_20dBZ.png'
+        outputs['fig_dummy'].touch()
         logger.info(f'saving to {figpath}')
         plt.savefig(figpath)
 
@@ -1660,7 +1685,7 @@ class AnalyseMatchRHIsToStorms(Rule):
 
     @staticmethod
     def plot_full_corr_matrix(case, tracking_precip_thresh, dZ_stats_filters, df_analysis_matches, outputs):
-        figdir = outputs['analyse_match_rhi_storm_stats'].parent
+        figdir = outputs['fig_dummy'].parent
         # Skip settings, match_idx and dt.
         cols = df_analysis_matches.columns.tolist()[3:]
         xcols = [c for c in cols if not c.startswith('deltaZ')]
@@ -1688,6 +1713,8 @@ class AnalyseMatchRHIsToStorms(Rule):
             # Only calc stats for the first, and use the second to calc only the change in along-beam precip.
             match2 = df_rhi_storm_stats.iloc[i + 1]
             row_stats = df_dZ_stats.loc[match.dZ_stats_idx]
+            if 'storm_idx1' not in match.index:
+                continue
             # This is *all* the rows for the given storm.
             df_storm = df_storms[df_storms.storm_idx == match.storm_idx1]
             row_mask = df_storm.time == match.storm_time
