@@ -163,12 +163,11 @@ def regrid_outputs(case, radar, batch_idx):
         'add_cartesian_coords': add_cartesian_coords,
         'xr_find_cloud_objects': xr_find_cloud_objects,
         'FlowInterp': FlowInterp,
-        'to_netcdf_tmp_then_copy': to_netcdf_tmp_then_copy,
-        'logger': logger,
-    },
+        'to_netcdf_tmp_then_copy': to_netcdf_tmp_then_copy,    },
 )
 def regrid_camra_kepler_l1(inputs, outputs, case, radar, batch_idx):
     """Regrid the CAMRa or Kepler data from polar coords to cartesian grid."""
+    from loguru import logger
 
     def setup_grid(radar, dx=settings.default_regrid_dx, dz=settings.default_regrid_dz):
         if radar == 'camra':
@@ -359,10 +358,11 @@ def plot_regridded_outputs(case, radar, batch_idx):
     outputs=plot_regridded_outputs,
     matrix=regrid_camra_kepler_l1.matrix,
     depends_on=[regrid_camra_kepler_l1],
-    uses={'plot_radarnet_rhi_transect': plot_radarnet_rhi_transect, 'logger': logger},
+    uses={'plot_radarnet_rhi_transect': plot_radarnet_rhi_transect},
 )
 def plot_regridded_camra_kepler_l1(inputs, outputs, case, radar, batch_idx):
     """Plot the regridded data."""
+    from loguru import logger
     for inpath, outpath in zip(inputs.values(), outputs.values()):
         logger.debug(f'{inpath} -> {outpath}')
         ds = xr.open_dataset(inpath).isel(time=0)
@@ -394,14 +394,13 @@ def find_camra_kepler_match_outputs(case):
         'CHIL_Y': CHIL_Y,
         'LYN_X': LYN_X,
         'LYN_Y': LYN_Y,
-        'RadarIntersectionCalculator': RadarIntersectionCalculator,
-        'logger': logger,
-    },
+        'RadarIntersectionCalculator': RadarIntersectionCalculator,    },
 )
 def find_camra_kepler_match(inputs, outputs, case):
     """Find CAMRa/Kepler scans that occur close to each other and calc intersection.
 
     NOT part of the active pipeline (disabled in the remake2 original) - translated but not registered."""
+    from loguru import logger
     logger.info(case)
 
     def find_pairs(t1, t2, thresh_s):
@@ -460,14 +459,13 @@ def plot_camra_kepler_match_outputs(case):
         'CHIL_Y': CHIL_Y,
         'LYN_X': LYN_X,
         'LYN_Y': LYN_Y,
-        'RadarIntersection': RadarIntersection,
-        'logger': logger,
-    },
+        'RadarIntersection': RadarIntersection,    },
 )
 def plot_camra_kepler_match(inputs, outputs, case):
     """Plot matches between CAMRa/Kepler.
 
     NOT part of the active pipeline (disabled in the remake2 original) - translated but not registered."""
+    from loguru import logger
     df = pd.read_hdf(inputs['camra_kepler_match'])
     kepler_paths = [v for k, v in inputs.items() if k.startswith('kepler_')]
     camra_paths = [v for k, v in inputs.items() if k.startswith('camra_')]
@@ -670,9 +668,10 @@ def find_candidate_delta_z_outputs(case):
     outputs=find_candidate_delta_z_outputs,
     matrix={'case': conf.CASES},
     depends_on=[regrid_camra_kepler_l1],
-    uses={'settings': settings, 'find_brackets': find_brackets, 'logger': logger},
+    uses={'settings': settings, 'find_brackets': find_brackets},
 )
 def find_candidate_delta_z(inputs, outputs, case):
+    from loguru import logger
     paths = inputs.values()
 
     time = []
@@ -808,9 +807,7 @@ def compare_delta_z_outputs(case, bracket_idx1, bracket_idx2):
         'DeltaZCandidateContext': DeltaZCandidateContext,
         'MatchRHIto3dWinds': MatchRHIto3dWinds,
         'Plot3dWinds': Plot3dWinds,
-        'to_netcdf_tmp_then_copy': to_netcdf_tmp_then_copy,
-        'logger': logger,
-    },
+        'to_netcdf_tmp_then_copy': to_netcdf_tmp_then_copy,    },
 )
 def compare_delta_z_candidates(inputs, outputs, case, bracket_idx1, bracket_idx2):
     """Use previously identified Delta Z candidates and analyse them together.
@@ -823,6 +820,7 @@ def compare_delta_z_candidates(inputs, outputs, case, bracket_idx1, bracket_idx2
     All helper functions are nested closures: each change to any of them changes compare_delta_z_candidates' own
     source, which is sufficient to trigger a rerun (uses= is only tracked one level deep from rule_run).
     """
+    from loguru import logger
 
     def load_data(bracket_idx1, bracket_idx2, inputs):
         df_candidate_scans = pd.read_hdf(inputs['candidate_scans'], key='candidate_scans')
@@ -1439,9 +1437,9 @@ def gather_delta_z_stats_outputs(case):
     outputs=gather_delta_z_stats_outputs,
     matrix=gather_delta_z_stats_matrix,
     depends_on=[compare_delta_z_candidates],
-    uses={'logger': logger},
 )
 def gather_delta_z_stats(inputs, outputs, case):
+    from loguru import logger
     outfile = Path(outputs['gathered_dZ_stats'])
     stats_hdfs = list(inputs.values())
     dfs = [pd.read_hdf(h) for h in stats_hdfs]
@@ -1528,12 +1526,11 @@ def match_rhis_to_storms_outputs(case, tracking_precip_thresh, dZ_stats_filters)
         'CHIL_X': CHIL_X,
         'CHIL_Y': CHIL_Y,
         'load_data': load_data,
-        'sliding_offset_to_slices': sliding_offset_to_slices,
-        'logger': logger,
-    },
+        'sliding_offset_to_slices': sliding_offset_to_slices,    },
 )
 def match_rhis_to_storms(inputs, outputs, case, tracking_precip_thresh, dZ_stats_filters):
     """For the deltaZ candidates, match the scans (first and second) to the radarnet tracked storms."""
+    from loguru import logger
 
     def storm_label_to_idx(df, time, label):
         storm_row = df[(df.time == time) & (df.storm_label_idx.values == label)]
@@ -1759,11 +1756,10 @@ def analyse_match_rhis_to_storms_outputs(case):
         'load_data': load_data,
         'append_analysis_stats': append_analysis_stats,
         'plot_full_corr_matrix': plot_full_corr_matrix,
-        'annotate_fit_with_line': annotate_fit_with_line,
-        'logger': logger,
-    },
+        'annotate_fit_with_line': annotate_fit_with_line,    },
 )
 def analyse_match_rhis_to_storms(inputs, outputs, case):
+    from loguru import logger
     logger.info(case)
     analysis_stats = []
     for tracking_precip_thresh in [1., 3., 5.]:
@@ -1834,11 +1830,10 @@ def analyse_all_match_rhis_to_storms_outputs():
     uses={
         'plot_full_corr_matrix': plot_full_corr_matrix,
         'annotate_fit_with_line': annotate_fit_with_line,
-        'chi2': chi2,
-        'logger': logger,
-    },
+        'chi2': chi2,    },
 )
 def analyse_all_match_rhis_to_storms(inputs, outputs):
+    from loguru import logger
     dfs = []
     for case in conf.CASES:
         df_analysis_matches_full = pd.read_hdf(inputs[f'{case}_analyse_match_rhi_storm_stats'],

@@ -258,10 +258,10 @@ def regrid_outputs(case, radar, batch_idx):
         'xr_find_cloud_objects': xr_find_cloud_objects,
         'FlowInterp': FlowInterp,
         'to_netcdf_tmp_then_copy': to_netcdf_tmp_then_copy,
-        'logger': logger,
     },
 )
 def regrid_camra_kepler_l1(inputs, outputs, case, radar, batch_idx):
+    from loguru import logger
     if LOAD_RADARNET:
         da_rain = xr.open_dataarray(inputs['radarnet'])
 
