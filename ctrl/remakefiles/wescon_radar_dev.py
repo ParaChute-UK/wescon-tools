@@ -3,7 +3,25 @@
 Handles CAMRa and Kepler radar data, located at Chilbolton and Lyneham respectively.
 
 **IMPORTANT** you have to run extract_convert_radarnet_dat_to_nc.py first.
-**IMPORTANT** the dependency handling is not perfect between different rules. You might have to run multiple times.
+**IMPORTANT** there is a known dynamic-matrix staleness gap - see below.
+
+Dynamic-matrix staleness
+------------------------
+compare_delta_z_candidates (and gather_delta_z_stats) build their task matrix by
+reading the `brackets` (dZ_candidates.hdf) output of find_candidate_delta_z. remake's
+MatrixNotReady defers them correctly when those outputs are *absent* (a cold start
+resolves in a single `remake run`). It does NOT cover the case where the brackets
+already exist but are *stale* - i.e. when find_candidate_delta_z is itself rerun
+(e.g. you edited it) in the same invocation: the matrix is expanded from the OLD
+brackets before the new ones are written, so compare_delta_z runs the wrong task set.
+The local executor's replan loop eventually self-corrects (with transient failures and
+orphaned outputs); the SLURM executor plans once and does NOT self-correct within one
+`remake run`.
+
+Workaround: when you change find_candidate_delta_z (or anything feeding the brackets),
+delete the dZ_candidates.hdf files first (this forces the handled absence/MatrixNotReady
+path), or just run `remake run` twice on SLURM. See remake3 design_docs/discussion.md
+("Dynamic matrices: defer on stale upstream") for the proposed permanent fix.
 
 * Regrids data from polar to cartesian coords.
 * Finds matches (close in time) scans between CAMRa/Kepler and calcs intersects.
