@@ -32,7 +32,7 @@ from matplotlib import patches
 from scipy.signal import find_peaks
 from scipy.stats import chi2
 
-from remake import Remake, rule
+from remake import MatrixNotReady, Remake, rule
 from simple_track.nimrod_user_functions import FileLoader
 from wescon_tools import proj_config as conf
 from wescon_tools.custom_osgb import CustomOSGB
@@ -765,11 +765,15 @@ def compare_delta_z_matrix():
     rows = []
     for case in conf.CASES:
         brackets_path = find_candidate_delta_z_outputs(case)['brackets']
-        if brackets_path.exists():
-            brackets = pd.read_hdf(brackets_path, key='brackets')
-            for i in range(1, len(brackets)):
-                if brackets.iloc[i]['deltaZ_candidate']:
-                    rows.append({'case': case, 'bracket_idx1': i - 1, 'bracket_idx2': i})
+        if not brackets_path.exists():
+            # Matrix depends on an upstream output (find_candidate_delta_z) that has
+            # not been produced yet. Defer until it exists rather than silently
+            # returning an empty matrix (which forces a manual rerun).
+            raise MatrixNotReady(brackets_path)
+        brackets = pd.read_hdf(brackets_path, key='brackets')
+        for i in range(1, len(brackets)):
+            if brackets.iloc[i]['deltaZ_candidate']:
+                rows.append({'case': case, 'bracket_idx1': i - 1, 'bracket_idx2': i})
     return rows
 
 
@@ -1402,14 +1406,26 @@ wind angle from: {wind_angle_from:.2f}$\degree$'''
     Path(outputs['fig_dummy']).touch()
 
 
+def gather_delta_z_stats_matrix():
+    # Matrix is static (one task per case), but it depends on the brackets file from
+    # find_candidate_delta_z (read in gather_delta_z_stats_inputs). Raise MatrixNotReady
+    # from the matrix callable so the planner defers this rule (and its downstream) until
+    # the brackets exist, rather than running against not-yet-produced inputs.
+    for case in conf.CASES:
+        brackets_path = find_candidate_delta_z_outputs(case)['brackets']
+        if not brackets_path.exists():
+            raise MatrixNotReady(brackets_path)
+    return [{'case': case} for case in conf.CASES]
+
+
 def gather_delta_z_stats_inputs(case):
     """Gather all scattered stats.hdf files into a single file for each case."""
+    brackets = pd.read_hdf(find_candidate_delta_z_outputs(case)['brackets'], key='brackets')
     inputs = {}
-    for row in compare_delta_z_matrix():
-        if row['case'] != case:
-            continue
-        dz_output = compare_delta_z_outputs(row['case'], row['bracket_idx1'], row['bracket_idx2'])['dZ_stats']
-        inputs[str(dz_output)] = dz_output
+    for i in range(1, len(brackets)):
+        if brackets.iloc[i]['deltaZ_candidate']:
+            dz_output = compare_delta_z_outputs(case, i - 1, i)['dZ_stats']
+            inputs[str(dz_output)] = dz_output
     return inputs
 
 
@@ -1421,7 +1437,7 @@ def gather_delta_z_stats_outputs(case):
 @rule(
     inputs=gather_delta_z_stats_inputs,
     outputs=gather_delta_z_stats_outputs,
-    matrix={'case': conf.CASES},
+    matrix=gather_delta_z_stats_matrix,
     depends_on=[compare_delta_z_candidates],
     uses={'logger': logger},
 )
