@@ -3,25 +3,17 @@
 Handles CAMRa and Kepler radar data, located at Chilbolton and Lyneham respectively.
 
 **IMPORTANT** you have to run extract_convert_radarnet_dat_to_nc.py first.
-**IMPORTANT** there is a known dynamic-matrix staleness gap - see below.
 
-Dynamic-matrix staleness
-------------------------
+Dynamic matrices
+----------------
 compare_delta_z_candidates (and gather_delta_z_stats) build their task matrix by
-reading the `brackets` (dZ_candidates.hdf) output of find_candidate_delta_z. remake's
-MatrixNotReady defers them correctly when those outputs are *absent* (a cold start
-resolves in a single `remake run`). It does NOT cover the case where the brackets
-already exist but are *stale* - i.e. when find_candidate_delta_z is itself rerun
-(e.g. you edited it) in the same invocation: the matrix is expanded from the OLD
-brackets before the new ones are written, so compare_delta_z runs the wrong task set.
-The local executor's replan loop eventually self-corrects (with transient failures and
-orphaned outputs); the SLURM executor plans once and does NOT self-correct within one
-`remake run`.
-
-Workaround: when you change find_candidate_delta_z (or anything feeding the brackets),
-delete the dZ_candidates.hdf files first (this forces the handled absence/MatrixNotReady
-path), or just run `remake run` twice on SLURM. See remake3 design_docs/discussion.md
-("Dynamic matrices: defer on stale upstream") for the proposed permanent fix.
+reading the `brackets` (dZ_candidates.hdf) output of find_candidate_delta_z. Their
+matrix callables are marked `@deferrable` and raise `Defer` when the brackets are
+absent, so remake defers them until find_candidate_delta_z has produced its output
+(resolved within a single `remake run` - locally via the replan loop, on SLURM via a
+continuation job). Because they are `@deferrable`, the planner ALSO defers them while
+find_candidate_delta_z is itself rerunning, so the matrix never expands from stale
+brackets. No manual "run it twice" is needed.
 
 * Regrids data from polar to cartesian coords.
 * Finds matches (close in time) scans between CAMRa/Kepler and calcs intersects.
@@ -50,7 +42,7 @@ from matplotlib import patches
 from scipy.signal import find_peaks
 from scipy.stats import chi2
 
-from remake import MatrixNotReady, Remake, rule
+from remake import Defer, Remake, deferrable, rule
 from simple_track.nimrod_user_functions import FileLoader
 from wescon_tools import proj_config as conf
 from wescon_tools.custom_osgb import CustomOSGB
@@ -778,6 +770,7 @@ def find_sliding_min_rmse(a1, a2):
     return offset
 
 
+@deferrable
 def compare_delta_z_matrix():
     rows = []
     for case in conf.CASES:
@@ -785,8 +778,10 @@ def compare_delta_z_matrix():
         if not brackets_path.exists():
             # Matrix depends on an upstream output (find_candidate_delta_z) that has
             # not been produced yet. Defer until it exists rather than silently
-            # returning an empty matrix (which forces a manual rerun).
-            raise MatrixNotReady(brackets_path)
+            # returning an empty matrix (which forces a manual rerun). @deferrable
+            # also makes the planner defer when find_candidate_delta_z is rerunning,
+            # so the matrix never expands from stale brackets.
+            raise Defer(brackets_path)
         brackets = pd.read_hdf(brackets_path, key='brackets')
         for i in range(1, len(brackets)):
             if brackets.iloc[i]['deltaZ_candidate']:
@@ -1422,15 +1417,17 @@ wind angle from: {wind_angle_from:.2f}$\degree$'''
     Path(outputs['fig_dummy']).touch()
 
 
+@deferrable
 def gather_delta_z_stats_matrix():
     # Matrix is static (one task per case), but it depends on the brackets file from
-    # find_candidate_delta_z (read in gather_delta_z_stats_inputs). Raise MatrixNotReady
-    # from the matrix callable so the planner defers this rule (and its downstream) until
-    # the brackets exist, rather than running against not-yet-produced inputs.
+    # find_candidate_delta_z (read in gather_delta_z_stats_inputs). Raise Defer from
+    # this @deferrable matrix so the planner defers this rule (and its downstream) until
+    # the brackets exist, rather than running against not-yet-produced inputs. @deferrable
+    # also defers while find_candidate_delta_z is rerunning (stale-output protection).
     for case in conf.CASES:
         brackets_path = find_candidate_delta_z_outputs(case)['brackets']
         if not brackets_path.exists():
-            raise MatrixNotReady(brackets_path)
+            raise Defer(brackets_path)
     return [{'case': case} for case in conf.CASES]
 
 
