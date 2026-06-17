@@ -39,6 +39,8 @@ dependencies = [
     "pyquerylist>=0.4.0",
     "scikit-image>=0.25.2",
     "scipy>=1.15.3",
+    "seaborn>=0.13.2",
+    "statsmodels>=0.14.5",
     "xarray>=2025.4.0",
 ]
 

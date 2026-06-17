@@ -4,9 +4,9 @@ KASBEX_OUTPUT_VN = 'v0.1'
 
 PATHS = {
     'datadir': Path('/gws/ssde/j25b/afesp/users/mmuetz/upflo/data'),
-    'outdir': Path('/gws/ssde/j25b/afesp/users/mmuetz/upflo/data/upflo_wp1_output'),
-    'figdir': Path('/gws/ssde/j25b/afesp/users/mmuetz/upflo/data/upflo_wp1_figs'),
-    'kasbexoutdir': Path(f'/gws/nopw/j04/parachute/mmuetz/data/kasbex/{KASBEX_OUTPUT_VN}'),
+    'outdir': Path('/gws/ssde/j25b/afesp/users/mmuetz/upflo/data/remake3/upflo_wp1_output'),
+    'figdir': Path('/gws/ssde/j25b/afesp/users/mmuetz/upflo/data/remake3/upflo_wp1_figs'),
+    'kasbexoutdir': Path(f'/gws/nopw/j04/parachute/mmuetz/data/kasbex/remake3/{KASBEX_OUTPUT_VN}'),
     'kepler_raw': Path('/gws/pw/j07/woest/data/ncas-mobile-ka-band-radar-1/L1_final/v1.0.0/iop/data/'),
     'camra_raw': Path('/gws/pw/j07/woest/data/ncas-radar-camra-1/L1_final/iop/data/'),
 }

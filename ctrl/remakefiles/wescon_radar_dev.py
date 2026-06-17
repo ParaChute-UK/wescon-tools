@@ -15,6 +15,7 @@ Contact: mark.muetzelfeldt@reading.ac.uk
 """
 from dataclasses import dataclass
 from itertools import batched, product
+from pathlib import Path
 from typing import Any
 
 import cartopy.crs as ccrs
@@ -24,12 +25,14 @@ import numpy as np
 import pandas as pd
 import scipy.stats as spstats
 import seaborn as sns
+import statsmodels.formula.api as smf
 import xarray as xr
 from loguru import logger
 from matplotlib import patches
 from scipy.signal import find_peaks
+from scipy.stats import chi2
 
-from remake import Remake, Rule
+from remake import Remake, rule
 from simple_track.nimrod_user_functions import FileLoader
 from wescon_tools import proj_config as conf
 from wescon_tools.custom_osgb import CustomOSGB
@@ -87,7 +90,7 @@ settings = Settings()
 # v12: try to get things running. Messed up dirs so that figs ended up in data dirs.
 output_vn = 'v13'
 
-slurm_config = {'account': 'afesp', 'partition': 'standard', 'qos': 'short', 'mem': 100000, 'exclude': 'host1117'}
+slurm_config = {'account': 'afesp', 'partition': 'standard', 'qos': 'standard', 'mem': 100000, 'exclude': 'host1117'}
 rmk = Remake(config=dict(slurm=slurm_config))
 
 
@@ -119,75 +122,54 @@ class CasePathsMap:
 cpmap = CasePathsMap(CPMAP_BATCH_SIZE)
 
 
-class RegridCAMRaKeplerL1(Rule):
+def regrid_matrix():
+    rows = []
+    # TODO!
+    # radars = ['camra', 'kepler']
+    radars = ['camra']
+    for case, radar in product(conf.CASES, radars):
+        for batch_idx in range(len(cpmap(case, radar))):
+            rows.append({'case': case, 'radar': radar, 'batch_idx': batch_idx})
+    return rows
+
+
+def regrid_inputs(case, radar, batch_idx):
+    paths = cpmap(case, radar)[batch_idx]
+    return {
+        **{'radar_paths': paths},
+        **{'radarnet': (
+                conf.PATHS['datadir'] / 'remake3' /
+                f'radarnet/{case[:4]}/{case[4:6]}/{case[6:8]}/metoffice-c-band-rain-radar_uk_{case}.nc')},
+    }
+
+
+def regrid_outputs(case, radar, batch_idx):
+    paths = cpmap(case, radar)[batch_idx]
+    return {f'gridded_data{i}': conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / case / radar / f'gridded_{path.stem}.nc'
+            for i, path in enumerate(paths)}
+
+
+@rule(
+    inputs=regrid_inputs,
+    outputs=regrid_outputs,
+    matrix=regrid_matrix,
+    uses={
+        'CHIL_X': CHIL_X,
+        'CHIL_Y': CHIL_Y,
+        'settings': settings,
+        'FIELD_NAME_MAP': FIELD_NAME_MAP,
+        'RADARNET_TIMESTEP_S': RADARNET_TIMESTEP_S,
+        'RadarRegridder': RadarRegridder,
+        'add_cartesian_coords': add_cartesian_coords,
+        'xr_find_cloud_objects': xr_find_cloud_objects,
+        'FlowInterp': FlowInterp,
+        'to_netcdf_tmp_then_copy': to_netcdf_tmp_then_copy,
+        'logger': logger,
+    },
+)
+def regrid_camra_kepler_l1(inputs, outputs, case, radar, batch_idx):
     """Regrid the CAMRa or Kepler data from polar coords to cartesian grid."""
 
-    @staticmethod
-    def rule_matrix():
-        paths = []
-        # TODO!
-        # radars = ['camra', 'kepler']
-        radars = ['camra']
-        for case, radar in product(conf.CASES, radars):
-            for batch_idx in list(range(len(cpmap(case, radar)))):
-                paths.append((case, radar, batch_idx))
-
-        return {('case', 'radar', 'batch_idx'): paths}
-
-    @staticmethod
-    def rule_inputs(case, radar, batch_idx):
-        paths = cpmap(case, radar)[batch_idx]
-        return {
-            **{'radar_paths': paths},
-            **{'radarnet': (
-                    conf.PATHS['datadir'] /
-                    f'radarnet/{case[:4]}/{case[4:6]}/{case[6:8]}/metoffice-c-band-rain-radar_uk_{case}.nc')},
-        }
-
-    @staticmethod
-    def rule_outputs(case, radar, batch_idx):
-        paths = cpmap(case, radar)[batch_idx]
-        return {f'gridded_data{i}': conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / case / radar / f'gridded_{path.stem}.nc'
-                for i, path in enumerate(paths)}
-
-    @staticmethod
-    def rule_run(inputs, outputs, case, radar, batch_idx):
-        logger.info(case)
-        da_rain = xr.open_dataarray(inputs['radarnet'])
-
-        da_rain = da_rain.sel(eastings=slice(CHIL_X - settings.domain_halfwidth, CHIL_X + settings.domain_halfwidth),
-            northings=slice(CHIL_Y - settings.domain_halfwidth, CHIL_Y + settings.domain_halfwidth), )
-        logger.debug(da_rain)
-
-        radar_paths = inputs['radar_paths']
-        x, z = RegridCAMRaKeplerL1.setup_grid(radar)
-        regridder = RadarRegridder(x, z)
-
-        for i, radar_path in enumerate(radar_paths):
-            ds = xr.open_dataset(radar_path)
-            time = pd.Timestamp(ds.time.values[0])
-            add_cartesian_coords(ds)
-
-            logger.debug('* regrid RHI Z')
-            attrs, regridded_fields = RegridCAMRaKeplerL1.regrid_fields(ds, regridder, radar)
-
-            logger.debug('* flow interp radarnet')
-            fi, interped_rain = RegridCAMRaKeplerL1.flow_interp_radarnet(da_rain, time)
-
-            logger.debug('* make dataset')
-            dsout = RegridCAMRaKeplerL1.build_dataset(ds, da_rain, x, z, time, fi, interped_rain, regridded_fields,
-                                                      attrs)
-
-            logger.debug('* find cloud objs')
-            cloud_labels, cloud_objs = xr_find_cloud_objects(dsout.isel(time=0))
-            if len(cloud_objs) > 20:
-                raise Exception('Over max # cloud_objs (20)')
-
-            dsout['cloud_labels'] = xr.DataArray([cloud_labels], dims=['time', 'z', 'x'], )
-            dsout = xr.merge([dsout, cloud_objs])
-            to_netcdf_tmp_then_copy(dsout, outputs[f'gridded_data{i}'])
-
-    @staticmethod
     def setup_grid(radar, dx=settings.default_regrid_dx, dz=settings.default_regrid_dz):
         if radar == 'camra':
             end = settings.camra_end
@@ -205,7 +187,6 @@ class RegridCAMRaKeplerL1(Rule):
         logger.debug(f'  - dz = {z[1] - z[0]} km')
         return x, z
 
-    @staticmethod
     def regrid_fields(ds, regridder, radar):
         points = np.array(list(zip(ds.r.values.flatten(), ds.z.values.flatten())))
         attrs = {}
@@ -217,7 +198,6 @@ class RegridCAMRaKeplerL1(Rule):
             regridded_fields[field] = regridder.regrid_field(ds, field_name, points, log_linear_remap=field == 'Z')
         return attrs, regridded_fields
 
-    @staticmethod
     def flow_interp_radarnet(da_rain, time):
         rain_times = pd.DatetimeIndex(da_rain.time)
         if time.minute % 5 == 0 and time.second == 0 and time.microsecond == 0:
@@ -237,9 +217,8 @@ class RegridCAMRaKeplerL1(Rule):
             interped_rain = fi.interp(frac)
         return fi, interped_rain
 
-    @staticmethod
     def build_dataset(ds, da_rain, x, z, time, fi, interped_rain, regridded_fields, attrs):
-        ds = xr.Dataset(data_vars=dict(rhi_mean_az=(['time'], [ds.azimuth.values.mean()]),
+        return xr.Dataset(data_vars=dict(rhi_mean_az=(['time'], [ds.azimuth.values.mean()]),
             rhi_Z=(['time', 'z', 'x'], [regridded_fields['Z']], attrs['Z'], {}),
             rhi_VEL=(['time', 'z', 'x'], [regridded_fields['VEL']], attrs['VEL'], {}),
             radarnet_flow_interped_rain=(['time', 'northings', 'eastings'], [interped_rain]),
@@ -249,14 +228,46 @@ class RegridCAMRaKeplerL1(Rule):
                 northings=da_rain.northings, eastings=da_rain.eastings, ),
             attrs=dict(project='UPFLO: Improving understanding and modelling of convective UPdraFts and anvil cLOuds',
                 contact='Mark Muetzelfeldt <mark.muetzelfeldt@reading.ac.uk>', ), )
-        return ds
+
+    logger.info(case)
+    da_rain = xr.open_dataarray(inputs['radarnet'])
+
+    da_rain = da_rain.sel(eastings=slice(CHIL_X - settings.domain_halfwidth, CHIL_X + settings.domain_halfwidth),
+        northings=slice(CHIL_Y - settings.domain_halfwidth, CHIL_Y + settings.domain_halfwidth), )
+    logger.debug(da_rain)
+
+    radar_paths = inputs['radar_paths']
+    x, z = setup_grid(radar)
+    regridder = RadarRegridder(x, z)
+
+    for i, radar_path in enumerate(radar_paths):
+        ds = xr.open_dataset(radar_path)
+        time = pd.Timestamp(ds.time.values[0])
+        add_cartesian_coords(ds)
+
+        logger.debug('* regrid RHI Z')
+        attrs, regridded_fields = regrid_fields(ds, regridder, radar)
+
+        logger.debug('* flow interp radarnet')
+        fi, interped_rain = flow_interp_radarnet(da_rain, time)
+
+        logger.debug('* make dataset')
+        dsout = build_dataset(ds, da_rain, x, z, time, fi, interped_rain, regridded_fields, attrs)
+
+        logger.debug('* find cloud objs')
+        cloud_labels, cloud_objs = xr_find_cloud_objects(dsout.isel(time=0))
+        if len(cloud_objs) > 20:
+            raise Exception('Over max # cloud_objs (20)')
+
+        dsout['cloud_labels'] = xr.DataArray([cloud_labels], dims=['time', 'z', 'x'], )
+        dsout = xr.merge([dsout, cloud_objs])
+        to_netcdf_tmp_then_copy(dsout, Path(outputs[f'gridded_data{i}']))
 
 
 def plot_radarnet_rhi_transect(ds, radar):
     # layout='constrained' causes fig pos to jump around.
     # UNLESS, you set ylim manually.
     fig = plt.figure(figsize=(20, 8), layout='constrained')
-    # fig = plt.figure(figsize=(20, 8))
     data_crs = CustomOSGB()
 
     gs = gridspec.GridSpec(ncols=2, nrows=2, figure=fig, height_ratios=[1, 0.3], width_ratios=[1, 2])
@@ -291,7 +302,6 @@ def plot_radarnet_rhi_transect(ds, radar):
 
 
 def plot_gridded_rhi(da, ax=None, radar='camra'):
-    # t = pd.Timestamp(da.time.values)
     if ax is None:
         plt.figure()
         ax = plt.gca()
@@ -307,9 +317,7 @@ def plot_gridded_rhi(da, ax=None, radar='camra'):
         ax.set_xlabel('Range from Lyneham [km]')
         ax.set_ylim(0, 12)
         ax.set_ylabel('Height above Lyneham [km]')
-    # ax.colorbar()
-    # ax.clim(-10,60)
-    ax.set_title('Radar reflectivity (raw) [dBZ]')  # ax.set_title(t)
+    ax.set_title('Radar reflectivity (raw) [dBZ]')
 
 
 def plot_radarnet(ds, ax=None, radar='camra'):
@@ -340,172 +348,190 @@ def plot_radarnet(ds, ax=None, radar='camra'):
     ax.plot(xs[0], ys[0], 'ko', transform=CustomOSGB())
 
 
-class PlotRegriddedCAMRaKeplerL1(Rule):
-    """Plot the regridded data."""
-    rule_matrix = RegridCAMRaKeplerL1.rule_matrix
-    rule_inputs = RegridCAMRaKeplerL1.rule_outputs
-
-    @staticmethod
-    def rule_outputs(case, radar, batch_idx):
-        inputs = RegridCAMRaKeplerL1.rule_outputs(case, radar, batch_idx)
-        return {f'fig_{i}': conf.PATHS[
-                                'figdir'] / 'wescon_radar_dev' / output_vn / case / radar / 'regridded' / f'{path.stem}.png'
+def plot_regridded_outputs(case, radar, batch_idx):
+    inputs = regrid_outputs(case, radar, batch_idx)
+    return {f'fig_{i}': conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / case / radar / 'regridded' / f'{path.stem}.png'
             for i, path in enumerate(inputs.values())}
 
-    depends_on = [plot_radarnet, plot_gridded_rhi, plot_radarnet_rhi_transect]
 
-    @staticmethod
-    def rule_run(inputs, outputs, case, radar, batch_idx):
-        for inpath, outpath in zip(inputs.values(), outputs.values()):
-            logger.debug(f'{inpath} -> {outpath}')
-            ds = xr.open_dataset(inpath).isel(time=0)
-            # time = pd.Timestamp(ds.time.values[time_idx])
-            plot_radarnet_rhi_transect(ds, radar)
-            # opath = outputs['output'].parent / f'{radar}_time_{time}.png'
-            plt.savefig(outpath)
-            plt.close('all')
-
-
-class FindCamraKeplerMatch(Rule):
-    """Find CAMRa/Kepler scans that occur close to each other and calc intersection."""
-    enabled = False
-    rule_matrix = {'case': conf.CASES}
-
-    @staticmethod
-    def rule_inputs(case):
-        b = conf.PATHS['outdir'] / f'wescon_radar_dev/{case}/'
-        kepler_paths = sorted((b / 'kepler').glob('*.nc'))
-        camra_paths = sorted((b / 'camra').glob('*.nc'))
-
-        return {**{f'camra_{path}': path for path in camra_paths},
-            **{f'kepler_{path}': path for path in kepler_paths}, }
-
-    @staticmethod
-    def rule_outputs(case):
-        return {'camra_kepler_match': conf.PATHS[
-                                          'outdir'] / f'wescon_radar_dev/{output_vn}/{case}/camra_kepler_match_{case}.hdf'}
-
-    @staticmethod
-    def rule_run(inputs, outputs, case):
-        logger.info(case)
-
-        kepler_paths = [v for k, v in inputs.items() if k.startswith('kepler_')]
-        camra_paths = [v for k, v in inputs.items() if k.startswith('camra_')]
-        ds_kep = xr.open_mfdataset(kepler_paths)
-        ds_cam = xr.open_mfdataset(camra_paths)
-
-        kt = pd.DatetimeIndex(ds_kep.time)
-        ct = pd.DatetimeIndex(ds_cam.time)
-
-        def find_pairs(t1, t2, thresh_s):
-            time_pairs = []
-            for t in t1:
-                td = t - t2
-                for tt in ct[np.abs(td.total_seconds()) < thresh_s]:
-                    time_pairs.append((t, tt))
-            return np.array(time_pairs, dtype=np.datetime64)
-
-        pairs = find_pairs(kt, ct, 20)
-        logger.debug(len(pairs))
-
-        ric = RadarIntersectionCalculator('CAMRa', 'Kepler', CHIL_X, CHIL_Y, LYN_X, LYN_Y)
-
-        def find_all_intersections(pairs):
-            intersections = []
-            for i in range(pairs.shape[0]):
-                cam_az = ds_cam.sel(time=pairs[i, 1]).rhi_mean_az.values.item()
-                kep_az = ds_kep.sel(time=pairs[i, 0]).rhi_mean_az.values.item()
-                ri = ric.calc_intersect(pairs[i, 1], pairs[i, 0], cam_az, kep_az)
-                intersections.append(ri)
-            return intersections
-
-        intersections = find_all_intersections(pairs)
-        df = pd.DataFrame(intersections)
-        df.to_hdf(outputs['camra_kepler_match'], key='camra_kepler_match')
+@rule(
+    inputs=regrid_camra_kepler_l1.outputs,
+    outputs=plot_regridded_outputs,
+    matrix=regrid_camra_kepler_l1.matrix,
+    depends_on=[regrid_camra_kepler_l1],
+    uses={'plot_radarnet_rhi_transect': plot_radarnet_rhi_transect, 'logger': logger},
+)
+def plot_regridded_camra_kepler_l1(inputs, outputs, case, radar, batch_idx):
+    """Plot the regridded data."""
+    for inpath, outpath in zip(inputs.values(), outputs.values()):
+        logger.debug(f'{inpath} -> {outpath}')
+        ds = xr.open_dataset(inpath).isel(time=0)
+        plot_radarnet_rhi_transect(ds, radar)
+        plt.savefig(outpath)
+        plt.close('all')
 
 
-class PlotCamraKeplerMatch(Rule):
-    """Plot matches between CAMRa/Kepler."""
-    enabled = False
-    rule_matrix = {'case': conf.CASES}
+def find_camra_kepler_match_inputs(case):
+    b = conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / case
+    kepler_paths = sorted((b / 'kepler').glob('*.nc'))
+    camra_paths = sorted((b / 'camra').glob('*.nc'))
 
-    @staticmethod
-    def rule_inputs(case):
-        inputs = FindCamraKeplerMatch.rule_inputs(case)
-        inputs['camra_kepler_match'] = FindCamraKeplerMatch.rule_outputs(case)['camra_kepler_match']
-        return inputs
+    return {**{f'camra_{path}': path for path in camra_paths},
+        **{f'kepler_{path}': path for path in kepler_paths}, }
 
-    @staticmethod
-    def rule_outputs(case):
-        return {'output': conf.PATHS[
-                              'figdir'] / f'wescon_radar_dev/{output_vn}/{case}/figs/camra_kepler_match_{case}_plots.dummy'}
 
-    @staticmethod
-    def rule_run(inputs, outputs, case):
-        df = pd.read_hdf(inputs['camra_kepler_match'])
-        kepler_paths = [v for k, v in inputs.items() if k.startswith('kepler_')]
-        camra_paths = [v for k, v in inputs.items() if k.startswith('camra_')]
-        ds_kep = xr.open_mfdataset(kepler_paths)
-        ds_cam = xr.open_mfdataset(camra_paths)
+def find_camra_kepler_match_outputs(case):
+    return {'camra_kepler_match': conf.PATHS[
+                                      'outdir'] / f'wescon_radar_dev/{output_vn}/{case}/camra_kepler_match_{case}.hdf'}
 
-        df2 = df[((df.dist1 > 0) & (df.dist2 > 0) & (df.dist1 < 150e3) & (df.dist2 < 50e3))]
-        ltuple = [RadarIntersection(*t) for t in df2.itertuples(index=False)]
-        for dvar in ['rhi_Z', 'rhi_VEL']:
-            for ri in ltuple:
-                logger.debug(ri)
-                fig = plt.figure(figsize=(20, 5), layout='constrained')
-                gs = gridspec.GridSpec(ncols=3, nrows=1, figure=fig)
 
-                ax0 = fig.add_subplot(gs[0], projection=ccrs.OSGB())
-                ax1 = fig.add_subplot(gs[1])
-                ax2 = fig.add_subplot(gs[2], sharex=ax1, sharey=ax1)
+@rule(
+    inputs=find_camra_kepler_match_inputs,
+    outputs=find_camra_kepler_match_outputs,
+    matrix={'case': conf.CASES},
+    uses={
+        'CHIL_X': CHIL_X,
+        'CHIL_Y': CHIL_Y,
+        'LYN_X': LYN_X,
+        'LYN_Y': LYN_Y,
+        'RadarIntersectionCalculator': RadarIntersectionCalculator,
+        'logger': logger,
+    },
+)
+def find_camra_kepler_match(inputs, outputs, case):
+    """Find CAMRa/Kepler scans that occur close to each other and calc intersection.
 
-                ax0.coastlines()
-                levels = [0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64]
-                colors = ((0, 0, 0.6), 'b', 'c', 'g', 'y', (1, 0.5, 0), 'r', 'm', (0.6, 0.6, 0.6))
-                da = ds_cam.radarnet_flow_interped_rain.sel(time=ri.time1)
-                ax0.contourf(da.eastings, da.northings, da, levels=levels, colors=colors, transform=ccrs.OSGB())
+    NOT part of the active pipeline (disabled in the remake2 original) - translated but not registered."""
+    logger.info(case)
 
-                az_mean = ds_cam.sel(time=ri.time1).rhi_mean_az.values.item()
-                xs = CHIL_X + np.linspace(0, 150e3, 16) * np.sin(az_mean * np.pi / 180)
-                ys = CHIL_Y + np.linspace(0, 150e3, 16) * np.cos(az_mean * np.pi / 180)
-                ax0.plot(xs, ys, 'k--', transform=ccrs.OSGB())
-                ax0.plot(xs[::2], ys[::2], 'kx', transform=ccrs.OSGB())
-                ax0.plot(xs[0], ys[0], 'ko', transform=ccrs.OSGB())
+    def find_pairs(t1, t2, thresh_s):
+        time_pairs = []
+        for t in t1:
+            td = t - t2
+            for tt in t2[np.abs(td.total_seconds()) < thresh_s]:
+                time_pairs.append((t, tt))
+        return np.array(time_pairs, dtype=np.datetime64)
 
-                az_mean = ds_kep.sel(time=ri.time2).rhi_mean_az.values.item()
-                xs = LYN_X + np.linspace(0, 50e3, 6) * np.sin(az_mean * np.pi / 180)
-                ys = LYN_Y + np.linspace(0, 50e3, 6) * np.cos(az_mean * np.pi / 180)
-                ax0.plot(xs, ys, 'k--', transform=ccrs.OSGB())
-                ax0.plot(xs[::2], ys[::2], 'kx', transform=ccrs.OSGB())
-                ax0.plot(xs[0], ys[0], 'ko', transform=ccrs.OSGB())
+    def find_all_intersections(pairs, ric, ds_cam, ds_kep):
+        intersections = []
+        for i in range(pairs.shape[0]):
+            cam_az = ds_cam.sel(time=pairs[i, 1]).rhi_mean_az.values.item()
+            kep_az = ds_kep.sel(time=pairs[i, 0]).rhi_mean_az.values.item()
+            ri = ric.calc_intersect(pairs[i, 1], pairs[i, 0], cam_az, kep_az)
+            intersections.append(ri)
+        return intersections
 
-                ax1.set_title(f'CAMRa {ri.time1}')
-                kwargs = dict(vmin=-10, vmax=60) if dvar == 'rhi_Z' else dict(vmin=-20, vmax=20, cmap='bwr')
-                ax1.pcolormesh(ds_cam.x - ri.dist1 / 1e3, ds_cam.z, ds_cam.sel(time=ri.time1)[dvar], **kwargs)
-                ax1.set_xticks(np.linspace(-20, 20, 5))
-                ax1.set_xticklabels([-20, -10, 0, 10, 20])
-                ax1.set_xlim(-20, 20)
-                ax1.set_ylim(0, 5)
+    kepler_paths = [v for k, v in inputs.items() if k.startswith('kepler_')]
+    camra_paths = [v for k, v in inputs.items() if k.startswith('camra_')]
+    ds_kep = xr.open_mfdataset(kepler_paths)
+    ds_cam = xr.open_mfdataset(camra_paths)
 
-                ax2.set_title(f'Kepler {ri.time2}')
-                im = ax2.pcolormesh(ds_kep.x - ri.dist2 / 1e3, ds_kep.z, ds_kep.sel(time=ri.time2)[dvar], **kwargs)
-                ax2.set_xticks(np.linspace(-20, 20, 5))
-                ax2.set_xticklabels([-20, -10, 0, 10, 20])
-                ax2.set_xlim(-20, 20)
-                ax2.set_ylim(0, 5)
-                if dvar == 'rhi_Z':
-                    plt.colorbar(im, ax=[ax1, ax2], orientation='vertical', label='Z (dbZ)')
-                else:
-                    plt.colorbar(im, ax=[ax1, ax2], orientation='vertical', label='vel (m s$^{-1}$)')
+    kt = pd.DatetimeIndex(ds_kep.time)
+    ct = pd.DatetimeIndex(ds_cam.time)
 
-                t1 = ri.time1.strftime("%Y%m%d_%H%M%S")
-                t2 = ri.time2.strftime("%Y%m%d_%H%M%S")
-                figname = f'camra_kepler_match_{t1}_{t2}.{dvar}.png'
-                figpath = outputs['output'].parent / figname
-                logger.debug(figpath)
-                plt.savefig(figpath)
-        outputs['output'].touch()
+    pairs = find_pairs(kt, ct, 20)
+    logger.debug(len(pairs))
+
+    ric = RadarIntersectionCalculator('CAMRa', 'Kepler', CHIL_X, CHIL_Y, LYN_X, LYN_Y)
+
+    intersections = find_all_intersections(pairs, ric, ds_cam, ds_kep)
+    df = pd.DataFrame(intersections)
+    df.to_hdf(Path(outputs['camra_kepler_match']), key='camra_kepler_match')
+
+
+def plot_camra_kepler_match_inputs(case):
+    inputs = find_camra_kepler_match_inputs(case)
+    inputs['camra_kepler_match'] = find_camra_kepler_match_outputs(case)['camra_kepler_match']
+    return inputs
+
+
+def plot_camra_kepler_match_outputs(case):
+    return {'output': conf.PATHS[
+                          'figdir'] / f'wescon_radar_dev/{output_vn}/{case}/figs/camra_kepler_match_{case}_plots.dummy'}
+
+
+@rule(
+    inputs=plot_camra_kepler_match_inputs,
+    outputs=plot_camra_kepler_match_outputs,
+    matrix={'case': conf.CASES},
+    depends_on=[find_camra_kepler_match],
+    uses={
+        'CHIL_X': CHIL_X,
+        'CHIL_Y': CHIL_Y,
+        'LYN_X': LYN_X,
+        'LYN_Y': LYN_Y,
+        'RadarIntersection': RadarIntersection,
+        'logger': logger,
+    },
+)
+def plot_camra_kepler_match(inputs, outputs, case):
+    """Plot matches between CAMRa/Kepler.
+
+    NOT part of the active pipeline (disabled in the remake2 original) - translated but not registered."""
+    df = pd.read_hdf(inputs['camra_kepler_match'])
+    kepler_paths = [v for k, v in inputs.items() if k.startswith('kepler_')]
+    camra_paths = [v for k, v in inputs.items() if k.startswith('camra_')]
+    ds_kep = xr.open_mfdataset(kepler_paths)
+    ds_cam = xr.open_mfdataset(camra_paths)
+
+    df2 = df[((df.dist1 > 0) & (df.dist2 > 0) & (df.dist1 < 150e3) & (df.dist2 < 50e3))]
+    ltuple = [RadarIntersection(*t) for t in df2.itertuples(index=False)]
+    for dvar in ['rhi_Z', 'rhi_VEL']:
+        for ri in ltuple:
+            logger.debug(ri)
+            fig = plt.figure(figsize=(20, 5), layout='constrained')
+            gs = gridspec.GridSpec(ncols=3, nrows=1, figure=fig)
+
+            ax0 = fig.add_subplot(gs[0], projection=ccrs.OSGB())
+            ax1 = fig.add_subplot(gs[1])
+            ax2 = fig.add_subplot(gs[2], sharex=ax1, sharey=ax1)
+
+            ax0.coastlines()
+            levels = [0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64]
+            colors = ((0, 0, 0.6), 'b', 'c', 'g', 'y', (1, 0.5, 0), 'r', 'm', (0.6, 0.6, 0.6))
+            da = ds_cam.radarnet_flow_interped_rain.sel(time=ri.time1)
+            ax0.contourf(da.eastings, da.northings, da, levels=levels, colors=colors, transform=ccrs.OSGB())
+
+            az_mean = ds_cam.sel(time=ri.time1).rhi_mean_az.values.item()
+            xs = CHIL_X + np.linspace(0, 150e3, 16) * np.sin(az_mean * np.pi / 180)
+            ys = CHIL_Y + np.linspace(0, 150e3, 16) * np.cos(az_mean * np.pi / 180)
+            ax0.plot(xs, ys, 'k--', transform=ccrs.OSGB())
+            ax0.plot(xs[::2], ys[::2], 'kx', transform=ccrs.OSGB())
+            ax0.plot(xs[0], ys[0], 'ko', transform=ccrs.OSGB())
+
+            az_mean = ds_kep.sel(time=ri.time2).rhi_mean_az.values.item()
+            xs = LYN_X + np.linspace(0, 50e3, 6) * np.sin(az_mean * np.pi / 180)
+            ys = LYN_Y + np.linspace(0, 50e3, 6) * np.cos(az_mean * np.pi / 180)
+            ax0.plot(xs, ys, 'k--', transform=ccrs.OSGB())
+            ax0.plot(xs[::2], ys[::2], 'kx', transform=ccrs.OSGB())
+            ax0.plot(xs[0], ys[0], 'ko', transform=ccrs.OSGB())
+
+            ax1.set_title(f'CAMRa {ri.time1}')
+            kwargs = dict(vmin=-10, vmax=60) if dvar == 'rhi_Z' else dict(vmin=-20, vmax=20, cmap='bwr')
+            ax1.pcolormesh(ds_cam.x - ri.dist1 / 1e3, ds_cam.z, ds_cam.sel(time=ri.time1)[dvar], **kwargs)
+            ax1.set_xticks(np.linspace(-20, 20, 5))
+            ax1.set_xticklabels([-20, -10, 0, 10, 20])
+            ax1.set_xlim(-20, 20)
+            ax1.set_ylim(0, 5)
+
+            ax2.set_title(f'Kepler {ri.time2}')
+            im = ax2.pcolormesh(ds_kep.x - ri.dist2 / 1e3, ds_kep.z, ds_kep.sel(time=ri.time2)[dvar], **kwargs)
+            ax2.set_xticks(np.linspace(-20, 20, 5))
+            ax2.set_xticklabels([-20, -10, 0, 10, 20])
+            ax2.set_xlim(-20, 20)
+            ax2.set_ylim(0, 5)
+            if dvar == 'rhi_Z':
+                plt.colorbar(im, ax=[ax1, ax2], orientation='vertical', label='Z (dbZ)')
+            else:
+                plt.colorbar(im, ax=[ax1, ax2], orientation='vertical', label='vel (m s$^{-1}$)')
+
+            t1 = ri.time1.strftime("%Y%m%d_%H%M%S")
+            t2 = ri.time2.strftime("%Y%m%d_%H%M%S")
+            figname = f'camra_kepler_match_{t1}_{t2}.{dvar}.png'
+            figpath = Path(outputs['output']).parent / figname
+            logger.debug(figpath)
+            plt.savefig(figpath)
+    Path(outputs['output']).touch()
 
 
 def find_brackets(df):
@@ -536,112 +562,6 @@ def find_brackets(df):
 
     df['bracket'] = bracket
     df['bracket_idx'] = bracket_idx
-
-
-class FindCandidateDeltaZ(Rule):
-    rule_matrix = {'case': conf.CASES}
-
-    @staticmethod
-    def rule_inputs(case):
-        paths = []
-        for batch_idx in list(range(len(cpmap(case, 'camra')))):
-            outputs = RegridCAMRaKeplerL1.rule_outputs(case, 'camra', batch_idx)
-            paths.extend(outputs.values())
-        return {str(p): p for p in paths}
-
-    @staticmethod
-    def rule_outputs(case):
-        outdir = conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
-        return {f'candidate_scans': outdir / f'{case}_scans.hdf', f'brackets': outdir / f'dZ_candidates.hdf', }
-
-    @staticmethod
-    def rule_run(inputs, outputs, case):
-        paths = inputs.values()
-
-        time = []
-        az = []
-        for p in paths:
-            ds = xr.open_dataset(p)
-            time.append(pd.Timestamp(ds.time.values.item()))
-            az.append(ds.rhi_mean_az.values.item())
-        df = pd.DataFrame(data={'path': [str(p) for p in paths], 'time': time, 'az': az})
-        df['delta_az'] = df.az.diff()
-
-        # Does the job of finding individual brackets and adding a column to the df.
-        find_brackets(df)
-
-        # Now one row per bracket.
-        brackets = df[['time', 'az', 'bracket']].groupby('bracket').mean()
-        bcount = df.groupby('bracket').size()
-        brackets['count'] = bcount
-        brackets['complete'] = bcount == 4
-
-        brackets['delta_time'] = brackets.time.diff()
-        brackets['delta_az'] = brackets.az.diff()
-
-        # Candidate if the below conditions are met.
-        brackets['deltaZ_candidate'] = ((brackets.delta_time < pd.Timedelta(minutes=settings.deltaZ_time_thresh)) & (
-                    brackets.delta_az < settings.deltaZ_az_thresh) & # Only a candidate if both curr and prev rows are complete.
-                                        (brackets.complete & brackets.complete.shift(1).fillna(False)))
-        logger.debug(df)
-        logger.debug(brackets)
-        df.to_hdf(outputs['candidate_scans'], key='candidate_scans')
-        brackets.to_hdf(outputs['brackets'], key='brackets')
-
-
-def rmse(a1, a2):
-    """Calculate the root mean square error between two arrays."""
-    return np.sqrt(((a1 - a2) ** 2).mean())
-
-
-def sliding_offset_to_slices(idx):
-    """Generate an appropriate slice from a given offset idx.
-
-    General, but only needed for array of len 4.
-    e.g.
-    idx = -1
-    a1 = [0, 1, 2, 3]
-    a2 = [0, 1, 2, 3]
-    s1, s2 = sliding_offset_to_slices(idx)
-    =>
-    a1[s1] == [0, 1, 2]
-    a2[s2] == [1, 2, 3]
-    """
-    if idx < 0:
-        return slice(None, idx), slice(-idx, None)
-    elif idx == 0:
-        return slice(None), slice(None)
-    else:
-        return slice(idx, None), slice(None, -idx)
-
-
-def find_sliding_min_rmse(a1, a2):
-    """Find the minimum RMSE between two arrays of length 4 by sliding them past each other.
-
-    This function compares overlapping segments of two arrays (a1 and a2) of length 4.
-    It slides a1 relative to a2 and calculates the RMSE for each overlap.
-    There are 7 possible overlaps:
-    - a1[:-3] vs a2[3:]
-    - a1[:-2] vs a2[2:]
-    ...
-    - a1[3:] vs a2[:-3]
-
-    Args:
-        a1: First array of length 4.
-        a2: Second array of length 4.
-
-    Returns:
-        offset of the minimum RMSE (in range -3 to 3 incl.)
-    """
-    assert len(a1) == len(a2) == 4
-    rmses = []
-    for i in range(-3, 4):
-        s1, s2 = sliding_offset_to_slices(i)
-        rmses.append(rmse(a1[s1], a2[s2]))
-
-    idx = np.argmin(rmses)
-    offset = idx - 3
-    return offset
 
 
 @dataclass
@@ -732,183 +652,174 @@ class DeltaZCandidateContext:
     aligned: bool
 
 
-class CompareDeltaZCandidates(Rule):
+def find_candidate_delta_z_inputs(case):
+    paths = []
+    for batch_idx in range(len(cpmap(case, 'camra'))):
+        out = regrid_outputs(case, 'camra', batch_idx)
+        paths.extend(out.values())
+    return {str(p): p for p in paths}
+
+
+def find_candidate_delta_z_outputs(case):
+    outdir = conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
+    return {'candidate_scans': outdir / f'{case}_scans.hdf', 'brackets': outdir / 'dZ_candidates.hdf', }
+
+
+@rule(
+    inputs=find_candidate_delta_z_inputs,
+    outputs=find_candidate_delta_z_outputs,
+    matrix={'case': conf.CASES},
+    depends_on=[regrid_camra_kepler_l1],
+    uses={'settings': settings, 'find_brackets': find_brackets, 'logger': logger},
+)
+def find_candidate_delta_z(inputs, outputs, case):
+    paths = inputs.values()
+
+    time = []
+    az = []
+    for p in paths:
+        ds = xr.open_dataset(p)
+        time.append(pd.Timestamp(ds.time.values.item()))
+        az.append(ds.rhi_mean_az.values.item())
+    df = pd.DataFrame(data={'path': [str(p) for p in paths], 'time': time, 'az': az})
+    df['delta_az'] = df.az.diff()
+
+    # Does the job of finding individual brackets and adding a column to the df.
+    find_brackets(df)
+
+    # Now one row per bracket.
+    brackets = df[['time', 'az', 'bracket']].groupby('bracket').mean()
+    bcount = df.groupby('bracket').size()
+    brackets['count'] = bcount
+    brackets['complete'] = bcount == 4
+
+    brackets['delta_time'] = brackets.time.diff()
+    brackets['delta_az'] = brackets.az.diff()
+
+    # Candidate if the below conditions are met.
+    brackets['deltaZ_candidate'] = ((brackets.delta_time < pd.Timedelta(minutes=settings.deltaZ_time_thresh)) & (
+                brackets.delta_az < settings.deltaZ_az_thresh) & # Only a candidate if both curr and prev rows are complete.
+                                    (brackets.complete & brackets.complete.shift(1).fillna(False)))
+    logger.debug(df)
+    logger.debug(brackets)
+    df.to_hdf(Path(outputs['candidate_scans']), key='candidate_scans')
+    brackets.to_hdf(Path(outputs['brackets']), key='brackets')
+
+
+def rmse(a1, a2):
+    """Calculate the root mean square error between two arrays."""
+    return np.sqrt(((a1 - a2) ** 2).mean())
+
+
+def sliding_offset_to_slices(idx):
+    """Generate an appropriate slice from a given offset idx.
+
+    General, but only needed for array of len 4.
+    e.g.
+    idx = -1
+    a1 = [0, 1, 2, 3]
+    a2 = [0, 1, 2, 3]
+    s1, s2 = sliding_offset_to_slices(idx)
+    =>
+    a1[s1] == [0, 1, 2]
+    a2[s2] == [1, 2, 3]
+    """
+    if idx < 0:
+        return slice(None, idx), slice(-idx, None)
+    elif idx == 0:
+        return slice(None), slice(None)
+    else:
+        return slice(idx, None), slice(None, -idx)
+
+
+def find_sliding_min_rmse(a1, a2):
+    """Find the minimum RMSE between two arrays of length 4 by sliding them past each other.
+
+    This function compares overlapping segments of two arrays (a1 and a2) of length 4.
+    It slides a1 relative to a2 and calculates the RMSE for each overlap.
+    There are 7 possible overlaps:
+    - a1[:-3] vs a2[3:]
+    - a1[:-2] vs a2[2:]
+    ...
+    - a1[3:] vs a2[:-3]
+
+    Args:
+        a1: First array of length 4.
+        a2: Second array of length 4.
+
+    Returns:
+        offset of the minimum RMSE (in range -3 to 3 incl.)
+    """
+    assert len(a1) == len(a2) == 4
+    rmses = []
+    for i in range(-3, 4):
+        s1, s2 = sliding_offset_to_slices(i)
+        rmses.append(rmse(a1[s1], a2[s2]))
+
+    idx = np.argmin(rmses)
+    offset = idx - 3
+    return offset
+
+
+def compare_delta_z_matrix():
+    rows = []
+    for case in conf.CASES:
+        brackets_path = find_candidate_delta_z_outputs(case)['brackets']
+        if brackets_path.exists():
+            brackets = pd.read_hdf(brackets_path, key='brackets')
+            for i in range(1, len(brackets)):
+                if brackets.iloc[i]['deltaZ_candidate']:
+                    rows.append({'case': case, 'bracket_idx1': i - 1, 'bracket_idx2': i})
+    return rows
+
+
+def compare_delta_z_inputs(case):
+    return find_candidate_delta_z_outputs(case)
+
+
+def compare_delta_z_outputs(case, bracket_idx1, bracket_idx2):
+    outdir = conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
+    figdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
+    return {
+        'dZ_stats': outdir / 'comparison' / f'{case}_{bracket_idx1}_{bracket_idx2}' / 'dZ_stats.hdf',
+        'fig_dummy': figdir / 'comparison' / f'{case}_{bracket_idx1}_{bracket_idx2}' / 'fig_dummy.out',
+    }
+
+
+@rule(
+    inputs=compare_delta_z_inputs,
+    outputs=compare_delta_z_outputs,
+    matrix=compare_delta_z_matrix,
+    depends_on=[find_candidate_delta_z],
+    uses={
+        'CHIL_X': CHIL_X,
+        'CHIL_Y': CHIL_Y,
+        'RADARNET_TIMESTEP_S': RADARNET_TIMESTEP_S,
+        'compare_settings': compare_settings,
+        'xr_find_cloud_objects': xr_find_cloud_objects,
+        'find_peaks': find_peaks,
+        'sliding_offset_to_slices': sliding_offset_to_slices,
+        'find_sliding_min_rmse': find_sliding_min_rmse,
+        'CrossCorrelationResult': CrossCorrelationResult,
+        'DeltaZCandidateContext': DeltaZCandidateContext,
+        'MatchRHIto3dWinds': MatchRHIto3dWinds,
+        'Plot3dWinds': Plot3dWinds,
+        'to_netcdf_tmp_then_copy': to_netcdf_tmp_then_copy,
+        'logger': logger,
+    },
+)
+def compare_delta_z_candidates(inputs, outputs, case, bracket_idx1, bracket_idx2):
     """Use previously identified Delta Z candidates and analyse them together.
 
     Handles offset along/parallel to beam, and across/perpendicular to beam.
     Parallel is handled by a combination of using the flow-derived winds and calculating the max correlation of signals.
     Perpendicular is handled by using the flow-derived winds to estimate which of the beams of the first bracket will
     match those of the second.
+
+    All helper functions are nested closures: each change to any of them changes compare_delta_z_candidates' own
+    source, which is sufficient to trigger a rerun (uses= is only tracked one level deep from rule_run).
     """
 
-    @staticmethod
-    def rule_matrix():
-        matrix = {('case', 'bracket_idx1', 'bracket_idx2'): []}
-        for case in conf.CASES:
-            inputs = FindCandidateDeltaZ.rule_outputs(case)
-            if inputs['brackets'].exists():
-                brackets = pd.read_hdf(inputs['brackets'], key='brackets')
-                for i in range(1, len(brackets)):
-                    if brackets.iloc[i]['deltaZ_candidate']:
-                        matrix[('case', 'bracket_idx1', 'bracket_idx2')].append((case, i - 1, i))
-        return matrix
-
-    @staticmethod
-    def rule_inputs(case, bracket_idx1, bracket_idx2):
-        return FindCandidateDeltaZ.rule_outputs(case)
-
-    @staticmethod
-    def rule_outputs(case, bracket_idx1, bracket_idx2):
-        outdir = conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
-        figdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
-        return {
-            f'dZ_stats': outdir / 'comparison' / f'{case}_{bracket_idx1}_{bracket_idx2}' / f'dZ_stats.hdf',
-            f'fig_dummy': figdir / 'comparison' / f'{case}_{bracket_idx1}_{bracket_idx2}' / f'fig_dummy.out',
-        }
-
-    @staticmethod
-    def rule_run(inputs, outputs, case, bracket_idx1, bracket_idx2):
-        ds1, ds2 = CompareDeltaZCandidates.load_data(bracket_idx1, bracket_idx2, inputs)
-        # This will calculate *all* offsets over the length of the beam, taking into account a given wind close to the
-        # radar will shift the 4 beams in each bracket relative to the next bracket by a greater degree than far from
-        # the radar.
-        new_beam_idxs, perp_offsets = CompareDeltaZCandidates.find_all_beam_alignment(ds1, ds2)
-
-        dZ_stats = []
-        # Loop over all offsets. This will mean that, for a given pair of clouds in the two composites, the subset
-        # of four beams will either be aligned or not aligned. This is wasteful, because you are calculating the
-        # full set of analysis even when not aligned, but I was not smart enough to figure out how to just do for
-        # aligned. See beams_aligned below.
-        for perp_offset in set(perp_offsets.values()):
-            # Subset the beams based on the offset.
-            s1, s2 = sliding_offset_to_slices(perp_offset)
-            beam_idx1 = tuple(np.arange(4)[s1])
-            beam_idx2 = tuple(np.arange(4)[s2])
-            ds1_comp, ds2_comp = CompareDeltaZCandidates.create_composites(ds1, ds2, list(beam_idx1), list(beam_idx2))
-
-            # Go through and find the coherent objects in each composite RHI.
-            labels1, labels2, objs1, objs2 = CompareDeltaZCandidates.find_coherent_objects(ds1_comp, ds2_comp)
-
-            # Find the overlaps between the two composite RHIs.
-            matches = CompareDeltaZCandidates.find_overlapping_cloud_matches(labels1, labels2, objs1, objs2)
-
-            # Perform matching to 3D winds.
-            matcher = MatchRHIto3dWinds(ds1_comp, time_interp=False)
-            matcher.match()
-            w_plane_hr = matcher.w_plane_hr
-            plotter = Plot3dWinds(matcher)
-            plotter.plot()
-
-            figdir = outputs['fig_dummy'].parent
-            figpath = figdir / f'3d_winds_{perp_offset}.png'
-            logger.debug(figpath)
-            plt.savefig(figpath)
-
-            for cl1, cl2 in matches:
-                dZ_stats.extend(CompareDeltaZCandidates.process_cloud_match(
-                    cl1, cl2, ds1, ds2, ds1_comp, ds2_comp, w_plane_hr,
-                    labels1, labels2, objs1, objs2,
-                    new_beam_idxs, beam_idx1, beam_idx2,
-                    bracket_idx1, bracket_idx2, perp_offset, outputs, case,
-                ))
-
-        df_dZ_stats = pd.DataFrame(dZ_stats)
-        df_dZ_stats.to_hdf(outputs['dZ_stats'], key='dZ_stats')
-        outputs['fig_dummy'].touch()
-
-    @staticmethod
-    def process_cloud_match(cl1, cl2, ds1, ds2, ds1_comp, ds2_comp, w_plane_hr,
-                            labels1, labels2, objs1, objs2,
-                            new_beam_idxs, beam_idx1, beam_idx2,
-                            bracket_idx1, bracket_idx2, perp_offset, outputs, case):
-        """Process one cloud pair across all valid parallel offsets.
-
-        Returns a list of stats dicts, one per corr_parallel_offset.
-        """
-        # Use info from both composites to subset fields based on where the overlapping clouds are.
-        (ds1_sub, ds2_sub, w_plane_hr_sub, cloud_union, xmin, xmax, zmax, x_idxmin, x_idxmax,
-         z_idxmax) = CompareDeltaZCandidates.subset_fields(cl1, cl2, ds1_comp, ds2_comp, w_plane_hr, labels1, labels2)
-        w_plane_hr_10dBZ = w_plane_hr_sub.values[ds1_sub.rhi_Z > 10]
-
-        # Calc the parallel/perpendicular winds from the flow-derived winds.
-        (wind_parallel_offset, mean_wind_parallel, mean_wind_perpendicular,
-         transect_wind_parallel, transect_wind_perpendicular) = (
-            CompareDeltaZCandidates.calc_parallel_perpendicular_winds(ds1_comp, ds2_comp, x_idxmin, x_idxmax))
-        xmid = (xmax + xmin) / 2
-        # beams_aligned: Work out whether the beams are aligned for these objects.
-        aligned = new_beam_idxs[int(round(xmid))] == (beam_idx1, beam_idx2)
-
-        # Calculate the cross correlation between the two composite, subset RHIs.
-        cc_result = CompareDeltaZCandidates.calc_cross_correlation(ds1_sub.rhi_Z, ds2_sub.rhi_Z)
-
-        # The cross corr will produce a number of valid offsets (peaks above threshold). Loop over these, and flag
-        # the one closest to the wind-predicted offset as "optimal".
-        # TODO: SCI: smarter ways of calcing optimal: eg including info from flow-derived winds and how strong corr is.
-        stats = []
-        for corr_parallel_offset in cc_result.valid_parallel_offsets:
-            optimal = (corr_parallel_offset == cc_result.valid_parallel_offsets[
-                np.argmin(np.abs(cc_result.valid_parallel_offsets - wind_parallel_offset))])
-
-            # Make a massive context obj to save having lots of arguments for functions.
-            ctx = DeltaZCandidateContext(
-                bracket_idx1=bracket_idx1, bracket_idx2=bracket_idx2,
-                beam_idx1=beam_idx1, beam_idx2=beam_idx2,
-                ds1=ds1, ds2=ds2,
-                ds1_comp=ds1_comp, ds2_comp=ds2_comp,
-                ds1_sub=ds1_sub, ds2_sub=ds2_sub,
-                cl1=cl1, cl2=cl2, cloud_union=cloud_union,
-                labels1=labels1, labels2=labels2,
-                xmin=xmin, xmax=xmax, zmax=zmax,
-                x_idxmin=x_idxmin, x_idxmax=x_idxmax, z_idxmax=z_idxmax,
-                cc_result=cc_result,
-                wind_parallel_offset=wind_parallel_offset,
-                mean_wind_parallel=mean_wind_parallel,
-                mean_wind_perpendicular=mean_wind_perpendicular,
-                transect_wind_parallel=transect_wind_parallel,
-                transect_wind_perpendicular=transect_wind_perpendicular,
-                offset=corr_parallel_offset,
-                optimal=optimal,
-                aligned=aligned,
-            )
-
-            figname = CompareDeltaZCandidates.plot_dashboard(outputs, ctx)
-            CompareDeltaZCandidates.save_results(outputs, ctx)
-            stats.append(CompareDeltaZCandidates._build_stats_entry(
-                ctx, objs1, objs2, w_plane_hr_10dBZ, perp_offset, case, figname,
-            ))
-        return stats
-
-    @staticmethod
-    def _build_stats_entry(ctx, objs1, objs2, w_plane_hr_10dBZ, perp_offset, case, figname):
-        """Assemble the scalar statistics dict for one (cloud pair, parallel offset) combination."""
-        deltaZ = np.roll(ctx.ds2_sub.rhi_Z.values, int(ctx.offset), axis=1) - ctx.ds1_sub.rhi_Z.values
-        deltaZ_20dBZ = deltaZ[ctx.ds1_sub.rhi_Z > 20]
-        # TODO: save info on winds for easy reference.
-        return {
-            'case': case,
-            'bracket_idx1': ctx.bracket_idx1, 'bracket_idx2': ctx.bracket_idx2,
-            'time1': pd.Timestamp(ctx.ds1_comp.time.values.item()),
-            'time2': pd.Timestamp(ctx.ds2_comp.time.values.item()),
-            'az_mean1': ctx.ds1_comp.rhi_mean_az.values.mean(),
-            'az_mean2': ctx.ds2_comp.rhi_mean_az.values.mean(),
-            'xmin': ctx.xmin, 'xmax': ctx.xmax, 'zmax': ctx.zmax,
-            'cl1': ctx.cl1, 'cl2': ctx.cl2,
-            'perp_offset': perp_offset, 'parallel_offset': ctx.offset,
-            'optimal_parallel_offset': ctx.optimal, 'aligned_perp_offset': ctx.aligned,
-            'o1_cloud_max_z': CompareDeltaZCandidates.get_obj_field(objs1, ctx.cl1, 'cloud_max_z'),
-            'o2_cloud_max_z': CompareDeltaZCandidates.get_obj_field(objs2, ctx.cl2, 'cloud_max_z'),
-            'deltaZ_mean': np.nanmean(deltaZ),
-            'deltaZ_absmean': np.nanmean(np.abs(deltaZ)),
-            'deltaZ_posmean': np.nanmean(deltaZ[deltaZ > 0]),
-            'deltaZ_mean_20dBZ': np.nanmean(deltaZ_20dBZ),
-            'deltaZ_absmean_20dBZ': np.nanmean(np.abs(deltaZ_20dBZ)),
-            'deltaZ_posmean_20dBZ': np.nanmean(deltaZ_20dBZ[deltaZ_20dBZ > 0]),
-            '3d_wind_max_w': np.nanmax(w_plane_hr_10dBZ),
-            '3d_wind_mean_w': np.nanmean(w_plane_hr_10dBZ),
-            'figname': str(figname),
-        }
-
-    @staticmethod
     def load_data(bracket_idx1, bracket_idx2, inputs):
         df_candidate_scans = pd.read_hdf(inputs['candidate_scans'], key='candidate_scans')
 
@@ -919,48 +830,17 @@ class CompareDeltaZCandidates(Rule):
         ds2 = xr.open_mfdataset(b2paths)
         return ds1, ds2
 
-    @staticmethod
-    def find_all_beam_alignment(ds1, ds2):
-        """Using the given flow field and bracketed beams (2 brackets),
-        calc each required beam_idx for each bracket along the beam.
+    def create_composites(ds1, ds2, beam_idx1, beam_idx2):
+        """Create composites from the full bracket based on specified individual beam_idxs
 
-        i.e. if there is a westerly flow at a few m/s, and the beams are pointing due north, then at small range,
-        there might be a large perpendicular offset required (because the beams are close here), and at large range,
-        there might be none required.
+        i.e. if beam_idx1 == [1, 2, 3], and beam_idx2 == [0, 1, 2], it will subset to these idxs.
         """
-        beam_idx = [0, 1, 2, 3]
-        ds1_comp, ds2_comp = CompareDeltaZCandidates.create_composites(ds1, ds2, beam_idx, beam_idx)
+        ds1_comp = ds1.isel(time=beam_idx1).mean(dim='time')
+        ds1_comp['time'] = ds1.isel(time=beam_idx1).time.mean()
+        ds2_comp = ds2.isel(time=beam_idx2).mean(dim='time')
+        ds2_comp['time'] = ds2.isel(time=beam_idx2).time.mean()
+        return ds1_comp, ds2_comp
 
-        t1 = pd.Timestamp(ds1_comp.time.values.item())
-        t2 = pd.Timestamp(ds2_comp.time.values.item())
-        dts = (t2 - t1).total_seconds()
-
-        new_beam_idxs = {}
-        perp_offsets = {}
-        for x in np.arange(compare_settings.alignment_range_min, compare_settings.alignment_range_max, 1):
-            x_idx = np.argmin(np.abs(ds1.x.values - x))
-            x_idxmin = x_idx - compare_settings.alignment_offset
-            x_idxmax = x_idx + compare_settings.alignment_offset
-            (est_offset, mean_wind_parallel, mean_wind_perpendicular, transect_wind_parallel,
-             transect_wind_perpendicular) = CompareDeltaZCandidates.calc_parallel_perpendicular_winds(ds1_comp,
-                                                                                                      ds2_comp,
-                                                                                                      x_idxmin,
-                                                                                                      x_idxmax)
-
-            beam_centres1 = x * (ds1.rhi_mean_az.values * np.pi / 180 - ds1.rhi_mean_az.values[0] * np.pi / 180)
-            # 1e3: convert from m to km.
-            beam_centres1_proj = beam_centres1 - mean_wind_perpendicular * dts / 1e3
-            beam_centres2 = x * (ds2.rhi_mean_az.values * np.pi / 180 - ds1.rhi_mean_az.values[0] * np.pi / 180)
-            perp_offset = find_sliding_min_rmse(beam_centres1_proj, beam_centres2)
-            s1, s2 = sliding_offset_to_slices(perp_offset)
-            beam_idx1 = np.arange(4)[s1]
-            beam_idx2 = np.arange(4)[s2]
-            new_beam_idxs[x] = (tuple(beam_idx1), tuple(beam_idx2))
-            perp_offsets[x] = perp_offset
-
-        return new_beam_idxs, perp_offsets
-
-    @staticmethod
     def calc_parallel_perpendicular_winds(ds1_comp, ds2_comp, x_idxmin, x_idxmax):
         """Based on the beam over x_idxmin/max, calc the parallel and perpendicular winds.
 
@@ -993,21 +873,46 @@ class CompareDeltaZCandidates(Rule):
 
         # -ve because it's an offset: positive wind means ds2 cloud is farther from radar - correction shifts it back.
         wind_parallel_offset = -mean_wind_parallel * dts / compare_settings.camra_resolution
+
         return wind_parallel_offset, mean_wind_parallel, mean_wind_perpendicular, transect_wind_parallel, transect_wind_perpendicular
 
-    @staticmethod
-    def create_composites(ds1, ds2, beam_idx1, beam_idx2):
-        """Create composites from the full bracket based on specified individual beam_idxs
+    def find_all_beam_alignment(ds1, ds2):
+        """Using the given flow field and bracketed beams (2 brackets),
+        calc each required beam_idx for each bracket along the beam.
 
-        i.e. if beam_idx1 == [1, 2, 3], and beam_idx2 == [0, 1, 2], it will subset to these idxs.
+        i.e. if there is a westerly flow at a few m/s, and the beams are pointing due north, then at small range,
+        there might be a large perpendicular offset required (because the beams are close here), and at large range,
+        there might be none required.
         """
-        ds1_comp = ds1.isel(time=beam_idx1).mean(dim='time')
-        ds1_comp['time'] = ds1.isel(time=beam_idx1).time.mean()
-        ds2_comp = ds2.isel(time=beam_idx2).mean(dim='time')
-        ds2_comp['time'] = ds2.isel(time=beam_idx2).time.mean()
-        return ds1_comp, ds2_comp
+        beam_idx = [0, 1, 2, 3]
+        ds1_comp, ds2_comp = create_composites(ds1, ds2, beam_idx, beam_idx)
 
-    @staticmethod
+        t1 = pd.Timestamp(ds1_comp.time.values.item())
+        t2 = pd.Timestamp(ds2_comp.time.values.item())
+        dts = (t2 - t1).total_seconds()
+
+        new_beam_idxs = {}
+        perp_offsets = {}
+        for x in np.arange(compare_settings.alignment_range_min, compare_settings.alignment_range_max, 1):
+            x_idx = np.argmin(np.abs(ds1.x.values - x))
+            x_idxmin = x_idx - compare_settings.alignment_offset
+            x_idxmax = x_idx + compare_settings.alignment_offset
+            (est_offset, mean_wind_parallel, mean_wind_perpendicular, transect_wind_parallel,
+             transect_wind_perpendicular) = calc_parallel_perpendicular_winds(ds1_comp, ds2_comp, x_idxmin, x_idxmax)
+
+            beam_centres1 = x * (ds1.rhi_mean_az.values * np.pi / 180 - ds1.rhi_mean_az.values[0] * np.pi / 180)
+            # 1e3: convert from m to km.
+            beam_centres1_proj = beam_centres1 - mean_wind_perpendicular * dts / 1e3
+            beam_centres2 = x * (ds2.rhi_mean_az.values * np.pi / 180 - ds1.rhi_mean_az.values[0] * np.pi / 180)
+            perp_offset = find_sliding_min_rmse(beam_centres1_proj, beam_centres2)
+            s1, s2 = sliding_offset_to_slices(perp_offset)
+            beam_idx1 = np.arange(4)[s1]
+            beam_idx2 = np.arange(4)[s2]
+            new_beam_idxs[x] = (tuple(beam_idx1), tuple(beam_idx2))
+            perp_offsets[x] = perp_offset
+
+        return new_beam_idxs, perp_offsets
+
     def find_coherent_objects(ds1_comp, ds2_comp):
         """Find coherent objects from each composite scan"""
         threshs = (compare_settings.refl_thresh1, compare_settings.refl_thresh2, compare_settings.refl_thresh3)
@@ -1015,7 +920,6 @@ class CompareDeltaZCandidates(Rule):
         labels2, objs2 = xr_find_cloud_objects(ds2_comp, threshs)
         return labels1, labels2, objs1, objs2
 
-    @staticmethod
     def find_overlapping_cloud_matches(labels1, labels2, objs1, objs2):
         """Find overlapping clouds (matches) between the two composites.
 
@@ -1027,7 +931,6 @@ class CompareDeltaZCandidates(Rule):
                     matches.append((int(cl1), int(cl2)))
         return matches
 
-    @staticmethod
     def subset_fields(cl1, cl2, ds1_comp, ds2_comp, w_plane_hr, labels1, labels2):
         """Subset the fields based on the current objects (in labels1/2)
 
@@ -1058,7 +961,6 @@ class CompareDeltaZCandidates(Rule):
 
         return ds1_sub, ds2_sub, w_plane_hr_sub, cloud_union, xmin, xmax, zmax, x_idxmin, x_idxmax, z_idxmax
 
-    @staticmethod
     def calc_cross_correlation(daZ1, daZ2):
         """Calculate the cross correlation between 2 Z fields.
 
@@ -1108,112 +1010,28 @@ class CompareDeltaZCandidates(Rule):
             valid_parallel_offsets=ccidx[np.intersect1d(peaks_above_ptile, peaks_not_too_far)])
         return cc_result
 
-    @staticmethod
-    def plot_dashboard(outputs, ctx: DeltaZCandidateContext):
-        fig, axes = CompareDeltaZCandidates.create_fig_axes()
-
-        u_mean = ctx.ds1_comp.radarnet_flow_vec_x.mean().values.item()
-        v_mean = ctx.ds1_comp.radarnet_flow_vec_y.mean().values.item()
-        t1 = pd.Timestamp(ctx.ds1_comp.time.values.item())
-        t2 = pd.Timestamp(ctx.ds2_comp.time.values.item())
-
-        dts = CompareDeltaZCandidates.plot_info(ctx.ds1, ctx.ds2, t1, t2, u_mean, v_mean, axes)
-        CompareDeltaZCandidates.plot_radarnet_combined(ctx.ds1, ctx.ds2, axes[0, 3], ctx.xmin, ctx.xmax)
-        CompareDeltaZCandidates.plot_radarnet(ctx.ds1, ctx.ds2, ctx.xmin, ctx.xmax, axes[1, 3], axes[2, 3],
-                                              ctx.beam_idx1, ctx.beam_idx2)
-
-        CompareDeltaZCandidates.plot_composites(ctx.ds1_comp, ctx.ds2_comp, ctx.xmin, ctx.xmax, ctx.zmax, axes[1:3, 0])
-        CompareDeltaZCandidates.plot_composites_for_match(ctx.ds1_sub, ctx.ds2_sub, ctx.cc_result.Z1, ctx.cc_result.Z2,
-                                                          ctx.cl1, ctx.cl2, ctx.cloud_union, ctx.x_idxmax, ctx.x_idxmin,
-                                                          ctx.z_idxmax, ctx.labels1, ctx.labels2, axes[:3, 1])
-        CompareDeltaZCandidates.plot_dZ(ctx.ds1_sub, ctx.ds2_sub, ctx.cc_result.Z1, ctx.cc_result.Z2,
-                                        (0, ctx.offset), axes[:, 2])
-
-        logger.debug(f'optimal: {ctx.optimal}')
-        CompareDeltaZCandidates.plot_cross_corr(ctx.cc_result, ctx.offset, ctx.optimal, axes[3, 0])
-
-        ax = axes[3, 1]
-        ax.set_title(f'par={ctx.mean_wind_parallel:.2f}, perp={ctx.mean_wind_perpendicular:.2f} [m/s],'
-                     f' est x-offset={ctx.wind_parallel_offset:.2f}')
-        ax.plot(ctx.ds1_comp.x.values, ctx.transect_wind_parallel)
-        ax.plot(ctx.ds1_comp.x.values, ctx.transect_wind_perpendicular)
-        ax.set_xlim(ctx.xmin, ctx.xmax)
-
-        offset, optimal, aligned = ctx.offset, ctx.optimal, ctx.aligned
-        fname = (f'dashboard.{ctx.bracket_idx1}_{ctx.bracket_idx2}.'
-                 f'{t1:%Y-%m-%d_%H%M%S}_{t2:%Y-%m-%d_%H%M%S}.'
-                 f'{ctx.cl1}_{ctx.cl2}.'
-                 f'{offset=}.{optimal=}.{aligned=}.'
-                 f'a1={ctx.beam_idx1}.a2={ctx.beam_idx2}.png'.replace(' ', ''))
-        logger.debug(fname)
-        figdir = outputs['fig_dummy'].parent
-        plt.savefig(figdir / fname)
-        outputs['fig_dummy'].touch()
-        return figdir / fname
-
-    @staticmethod
     def get_obj_field(objs, cl, field):
         obj_cloud_idx = np.where(objs.isel(time=0).cloud_label.values == cl)[0].item()
         return objs.isel(time=0).sel(reflectivity_thresh=10)[field].values[obj_cloud_idx]
 
-    @staticmethod
-    def save_results(outputs, ctx: DeltaZCandidateContext):
-        """Construct and populate a large xr.Dataset before saving it to .nc
+    def create_fig_axes(dpi=100, w_px=1920, h_px=1080):
+        fig = plt.figure(layout='constrained', figsize=(w_px / dpi, h_px / dpi), dpi=dpi)
+        gs = gridspec.GridSpec(ncols=4, nrows=4, figure=fig)
 
-        .nc files have aligned (i.e. are the individual beams that make up a bracket correctly aligned given
-        perpendicular wind) and optimal (i.e. does the correlation peak match the parallel wind) in their file names.
-        .nc files are easily concat-able.
-        """
-        offset, optimal, aligned = ctx.offset, ctx.optimal, ctx.aligned
-        cl1, cl2 = ctx.cl1, ctx.cl2
-        cc_result, ds1_sub, ds2_sub = ctx.cc_result, ctx.ds1_sub, ctx.ds2_sub
+        axes = np.zeros((4, 4), dtype=object)
+        shares = {(1, 1): (0, 1), (2, 1): (0, 1), (0, 2): (0, 1), (1, 2): (0, 1), (2, 2): (0, 1), (3, 2): (0, 1),
+            (2, 3): (1, 3), (2, 0): (1, 0), }
+        offs = {(0, 0), (3, 3)}
+        for i, j in product(range(4), range(4)):
+            kwargs = {} if (i, j) not in shares else {'sharex': axes[shares[i, j]], 'sharey': axes[shares[i, j]]}
+            axes[i, j] = fig.add_subplot(gs[i, j], **kwargs)
+            if (i, j) in offs:
+                axes[i, j].axis('off')
 
-        comparison_id_str = f"cl{cl1}_cl{cl2}_offset{offset}"
-        output_path = outputs['dZ_stats'].parent / f"deltaZ_comparison.cl{cl1}_cl{cl2}.{offset=}.{optimal=}.{aligned=}.nc"
+        for ax in axes[:3, 3]:
+            ax.set_aspect(1, adjustable='box')
+        return fig, axes
 
-        ds_out = xr.Dataset(coords=dict(comparison_id=[comparison_id_str],
-            x=ds1_sub.x, z=ds1_sub.z, cc_len=np.arange(len(cc_result.ccidx)),
-            peak_len=np.arange(len(cc_result.peaks)), ),
-            data_vars=dict(optimal=(("comparison_id",), [optimal]), aligned=(("comparison_id",), [aligned]),
-                offset=(("comparison_id",), [offset]), ccidx=(("comparison_id", "cc_len"), [cc_result.ccidx]),
-                ccplot=(("comparison_id", "cc_len"), [cc_result.ccplot]),
-                peaks=(("comparison_id", "peak_len"), [cc_result.peaks]),
-                peak_vals=(("comparison_id", "peak_len"), [cc_result.peak_vals]),
-                rhi_Z_ds1=(("comparison_id", "z", "x"), [ds1_sub.rhi_Z.values], ds1_sub.rhi_Z.attrs),
-                rhi_Z_ds2=(("comparison_id", "z", "x"), [ds2_sub.rhi_Z.values], ds2_sub.rhi_Z.attrs),
-                offset_thresh=(("comparison_id",), [cc_result.offset_thresh]),
-                half=(("comparison_id",), [cc_result.half]), p95=(("comparison_id",), [cc_result.percentiles['p95']]),
-                p98=(("comparison_id",), [cc_result.percentiles['p98']]),
-                p99=(("comparison_id",), [cc_result.percentiles['p99']]),
-                time1=(("comparison_id",), [str(ds1_sub.time.values)]),
-                time2=(("comparison_id",), [str(ds2_sub.time.values)]), cl1=(("comparison_id",), [cl1]),
-                cl2=(("comparison_id",), [cl2]), ), )
-
-        to_netcdf_tmp_then_copy(ds_out, output_path)
-
-    @staticmethod
-    def plot_cross_corr(cc_result, offset, optimal_offset, ax):
-        ax.set_title(f'cross corr: x-offset={offset} (={offset * compare_settings.camra_resolution}m)')
-        ax.plot(cc_result.ccidx, cc_result.ccplot)
-        ax.axhline(y=cc_result.percentiles['p95'], color='k', ls='-.')
-        ax.axhline(y=cc_result.percentiles['p98'], color='k', ls='--')
-        ax.axhline(y=cc_result.percentiles['p99'], color='k', ls='-')
-        ax.axvline(x=-cc_result.offset_thresh, color='k', ls='-.')
-        ax.axvline(x=cc_result.offset_thresh, color='k', ls='-.')
-        for ptile, c in [(cc_result.percentiles['p95'], 'k')]:
-            peaks_above_ptile = cc_result.peaks[cc_result.peak_vals > ptile]
-            peaks_not_too_far = cc_result.peaks[(cc_result.ccidx[cc_result.peaks] > -cc_result.offset_thresh) & (
-                    cc_result.ccidx[cc_result.peaks] < cc_result.offset_thresh)]
-            keep_mask = np.intersect1d(peaks_above_ptile, peaks_not_too_far)
-            ax.scatter(cc_result.ccidx[keep_mask], cc_result.ccplot[keep_mask], color=c, marker='o')
-        if optimal_offset:
-            ax.scatter(cc_result.ccidx[offset + cc_result.half], cc_result.ccplot[offset + cc_result.half], color='g',
-                       marker='o')
-        else:
-            ax.scatter(cc_result.ccidx[offset + cc_result.half], cc_result.ccplot[offset + cc_result.half], color='r',
-                       marker='o')
-
-    @staticmethod
     def plot_info(ds1, ds2, t1, t2, u_mean, v_mean, axes):
         dt = t2 - t1
         dts = dt.total_seconds()
@@ -1234,30 +1052,7 @@ wind angle from: {wind_angle_from:.2f}$\degree$'''
         axes[0, 0].text(0, 1, msg, ha='left', va='top')
         return dts
 
-    @staticmethod
-    def create_fig_axes(dpi=100, w_px=1920, h_px=1080):
-        fig = plt.figure(layout='constrained', figsize=(w_px / dpi, h_px / dpi), dpi=dpi)
-        gs = gridspec.GridSpec(ncols=4, nrows=4, figure=fig)
-
-        axes = np.zeros((4, 4), dtype=object)
-        shares = {(1, 1): (0, 1), (2, 1): (0, 1), (0, 2): (0, 1), (1, 2): (0, 1), (2, 2): (0, 1), (3, 2): (0, 1),
-            (2, 3): (1, 3), (2, 0): (1, 0), }
-        offs = {(0, 0), (3, 3)}
-        for i, j in product(range(4), range(4)):
-            kwargs = {} if (i, j) not in shares else {'sharex': axes[shares[i, j]], 'sharey': axes[shares[i, j]]}
-            axes[i, j] = fig.add_subplot(gs[i, j], **kwargs)
-            if (i, j) in offs:
-                axes[i, j].axis('off')
-
-        for ax in axes[:3, 3]:
-            ax.set_aspect(1, adjustable='box')
-        return fig, axes
-
-    @staticmethod
-    def plot_radarnet(ds1, ds2, xmin, xmax, ax1, ax2, beam_idx1, beam_idx2):
-        # km to m.
-        # xmin *= 1e3
-        # xmax *= 1e3
+    def plot_radarnet_comparison(ds1, ds2, xmin, xmax, ax1, ax2, beam_idx1, beam_idx2):
         da1 = ds1.radarnet_flow_interped_rain.mean(dim='time')
         da2 = ds2.radarnet_flow_interped_rain.mean(dim='time')
 
@@ -1286,16 +1081,11 @@ wind angle from: {wind_angle_from:.2f}$\degree$'''
         az_mean = np.mean([ds1.rhi_mean_az.values.mean(), ds2.rhi_mean_az.values.mean()])
         xmid = (xmin + xmax) / 2
         dx = xmax - xmin
-        # xcentre = CHIL_X / 1e3 + xmid * np.sin(az_mean * np.pi / 180)
-        # ycentre = CHIL_Y / 1e3 + xmid * np.cos(az_mean * np.pi / 180)
         xcentre = xmid * np.sin(az_mean * np.pi / 180)
         ycentre = xmid * np.cos(az_mean * np.pi / 180)
         ax.set_xlim(xcentre - dx / 2, xcentre + dx / 2)
         ax.set_ylim(ycentre - dx / 2, ycentre + dx / 2)
 
-        # plt.savefig(figdir / f'radarnet_{cl1}-{cl2}.png'.replace(' ', '_'))
-
-    @staticmethod
     def plot_dZ(ds1_sub, ds2_sub, Z1, Z2, offset_vec, axes):
         axtwin = axes[0].twinx()
         axtwin.plot(ds1_sub.x, Z1.mean(axis=0))
@@ -1308,7 +1098,6 @@ wind angle from: {wind_angle_from:.2f}$\degree$'''
                         levels=[10, 35, 55], colors=['red', 'red', 'red'])
 
         axes[1].pcolormesh(ds1_sub.x, ds1_sub.z, ds1_sub.rhi_Z.values, vmin=-10, vmax=60)
-        # axes[2].pcolormesh(ds1_sub.x, ds1_sub.z, np.roll(np.roll(Z2, int(offset_vec[0]), axis=0), int(offset_vec[1]), axis=1), vmin=-10, vmax=60)
         # ONLY roll in x-dir
         axes[2].set_title(f'x-offset={offset_vec[1]}')
         axes[2].pcolormesh(ds1_sub.x, ds1_sub.z, np.roll(ds2_sub.rhi_Z.values, int(offset_vec[1]), axis=1), vmin=-10,
@@ -1319,7 +1108,6 @@ wind angle from: {wind_angle_from:.2f}$\degree$'''
                            vmax=20, cmap='bwr')
         axes[3].set_title(r'$\Delta$Z (-20 to 20 dBZ)')
 
-    @staticmethod
     def plot_composites_for_match(ds1_sub, ds2_sub, Z1, Z2, cl1, cl2, cloud_union, x_idxmax, x_idxmin, z_idxmax,
                                   labels1, labels2, axes):
         axes[0].contour(ds1_sub.x, ds1_sub.z, (labels1 == cl1)[:z_idxmax, x_idxmin:x_idxmax], levels=[0.5],
@@ -1337,7 +1125,6 @@ wind angle from: {wind_angle_from:.2f}$\degree$'''
         axes[1].set_title(f'RHI 1, cloud {cl1}')
         axes[2].set_title(f'RHI 2, cloud {cl2}')
 
-    @staticmethod
     def plot_composites(ds1_comp, ds2_comp, xmin, xmax, zmax, axes):
         axes[0].pcolormesh(ds1_comp.x, ds1_comp.z, ds1_comp.rhi_Z, vmin=-10, vmax=60)
         axes[1].pcolormesh(ds1_comp.x, ds1_comp.z, ds2_comp.rhi_Z, vmin=-10, vmax=60)
@@ -1348,7 +1135,6 @@ wind angle from: {wind_angle_from:.2f}$\degree$'''
             rect = patches.Rectangle((xmin, 0), xmax - xmin, zmax, fill=False, linewidth=1)
             ax.add_patch(rect)
 
-    @staticmethod
     def plot_radarnet_combined(ds1, ds2, ax, xmin, xmax):
         ds_comp = xr.concat([ds1, ds2], dim='time')
         da = ds_comp.radarnet_flow_interped_rain.mean(dim='time')
@@ -1369,13 +1155,8 @@ wind angle from: {wind_angle_from:.2f}$\degree$'''
             ax.plot(xs, ys, 'kx', lw=3)
 
         az_mean = np.mean([ds1.rhi_mean_az.values.mean(), ds2.rhi_mean_az.values.mean()])
-        # km to m.
-        # xmin *= 1e3
-        # xmax *= 1e3
         xmid = (xmin + xmax) / 2
         dx = xmax - xmin
-        # xcentre = CHIL_X / 1e3 + xmid * np.sin(az_mean * np.pi / 180)
-        # ycentre = CHIL_Y / 1e3 + xmid * np.cos(az_mean * np.pi / 180)
         xcentre = xmid * np.sin(az_mean * np.pi / 180)
         ycentre = xmid * np.cos(az_mean * np.pi / 180)
 
@@ -1386,156 +1167,363 @@ wind angle from: {wind_angle_from:.2f}$\degree$'''
         ax.set_xlim(-150, 150)
         ax.set_ylim(-150, 150)
 
+    def plot_cross_corr(cc_result, offset, optimal_offset, ax):
+        ax.set_title(f'cross corr: x-offset={offset} (={offset * compare_settings.camra_resolution}m)')
+        ax.plot(cc_result.ccidx, cc_result.ccplot)
+        ax.axhline(y=cc_result.percentiles['p95'], color='k', ls='-.')
+        ax.axhline(y=cc_result.percentiles['p98'], color='k', ls='--')
+        ax.axhline(y=cc_result.percentiles['p99'], color='k', ls='-')
+        ax.axvline(x=-cc_result.offset_thresh, color='k', ls='-.')
+        ax.axvline(x=cc_result.offset_thresh, color='k', ls='-.')
+        for ptile, c in [(cc_result.percentiles['p95'], 'k')]:
+            peaks_above_ptile = cc_result.peaks[cc_result.peak_vals > ptile]
+            peaks_not_too_far = cc_result.peaks[(cc_result.ccidx[cc_result.peaks] > -cc_result.offset_thresh) & (
+                    cc_result.ccidx[cc_result.peaks] < cc_result.offset_thresh)]
+            keep_mask = np.intersect1d(peaks_above_ptile, peaks_not_too_far)
+            ax.scatter(cc_result.ccidx[keep_mask], cc_result.ccplot[keep_mask], color=c, marker='o')
+        if optimal_offset:
+            ax.scatter(cc_result.ccidx[offset + cc_result.half], cc_result.ccplot[offset + cc_result.half], color='g',
+                       marker='o')
+        else:
+            ax.scatter(cc_result.ccidx[offset + cc_result.half], cc_result.ccplot[offset + cc_result.half], color='r',
+                       marker='o')
 
-class GatherDeltaZStats(Rule):
+    def plot_dashboard(outputs, ctx: DeltaZCandidateContext):
+        fig, axes = create_fig_axes()
+
+        u_mean = ctx.ds1_comp.radarnet_flow_vec_x.mean().values.item()
+        v_mean = ctx.ds1_comp.radarnet_flow_vec_y.mean().values.item()
+        t1 = pd.Timestamp(ctx.ds1_comp.time.values.item())
+        t2 = pd.Timestamp(ctx.ds2_comp.time.values.item())
+
+        dts = plot_info(ctx.ds1, ctx.ds2, t1, t2, u_mean, v_mean, axes)
+        plot_radarnet_combined(ctx.ds1, ctx.ds2, axes[0, 3], ctx.xmin, ctx.xmax)
+        plot_radarnet_comparison(ctx.ds1, ctx.ds2, ctx.xmin, ctx.xmax, axes[1, 3], axes[2, 3],
+                                  ctx.beam_idx1, ctx.beam_idx2)
+
+        plot_composites(ctx.ds1_comp, ctx.ds2_comp, ctx.xmin, ctx.xmax, ctx.zmax, axes[1:3, 0])
+        plot_composites_for_match(ctx.ds1_sub, ctx.ds2_sub, ctx.cc_result.Z1, ctx.cc_result.Z2,
+                                  ctx.cl1, ctx.cl2, ctx.cloud_union, ctx.x_idxmax, ctx.x_idxmin,
+                                  ctx.z_idxmax, ctx.labels1, ctx.labels2, axes[:3, 1])
+        plot_dZ(ctx.ds1_sub, ctx.ds2_sub, ctx.cc_result.Z1, ctx.cc_result.Z2, (0, ctx.offset), axes[:, 2])
+
+        logger.debug(f'optimal: {ctx.optimal}')
+        plot_cross_corr(ctx.cc_result, ctx.offset, ctx.optimal, axes[3, 0])
+
+        ax = axes[3, 1]
+        ax.set_title(f'par={ctx.mean_wind_parallel:.2f}, perp={ctx.mean_wind_perpendicular:.2f} [m/s],'
+                     f' est x-offset={ctx.wind_parallel_offset:.2f}')
+        ax.plot(ctx.ds1_comp.x.values, ctx.transect_wind_parallel)
+        ax.plot(ctx.ds1_comp.x.values, ctx.transect_wind_perpendicular)
+        ax.set_xlim(ctx.xmin, ctx.xmax)
+
+        offset, optimal, aligned = ctx.offset, ctx.optimal, ctx.aligned
+        fname = (f'dashboard.{ctx.bracket_idx1}_{ctx.bracket_idx2}.'
+                 f'{t1:%Y-%m-%d_%H%M%S}_{t2:%Y-%m-%d_%H%M%S}.'
+                 f'{ctx.cl1}_{ctx.cl2}.'
+                 f'{offset=}.{optimal=}.{aligned=}.'
+                 f'a1={ctx.beam_idx1}.a2={ctx.beam_idx2}.png'.replace(' ', ''))
+        logger.debug(fname)
+        figdir = Path(outputs['fig_dummy']).parent
+        plt.savefig(figdir / fname)
+        Path(outputs['fig_dummy']).touch()
+        return figdir / fname
+
+    def save_results(outputs, ctx: DeltaZCandidateContext):
+        """Construct and populate a large xr.Dataset before saving it to .nc
+
+        .nc files have aligned (i.e. are the individual beams that make up a bracket correctly aligned given
+        perpendicular wind) and optimal (i.e. does the correlation peak match the parallel wind) in their file names.
+        .nc files are easily concat-able.
+        """
+        offset, optimal, aligned = ctx.offset, ctx.optimal, ctx.aligned
+        cl1, cl2 = ctx.cl1, ctx.cl2
+        cc_result, ds1_sub, ds2_sub = ctx.cc_result, ctx.ds1_sub, ctx.ds2_sub
+
+        comparison_id_str = f"cl{cl1}_cl{cl2}_offset{offset}"
+        output_path = Path(outputs['dZ_stats']).parent / f"deltaZ_comparison.cl{cl1}_cl{cl2}.{offset=}.{optimal=}.{aligned=}.nc"
+
+        ds_out = xr.Dataset(coords=dict(comparison_id=[comparison_id_str],
+            x=ds1_sub.x, z=ds1_sub.z, cc_len=np.arange(len(cc_result.ccidx)),
+            peak_len=np.arange(len(cc_result.peaks)), ),
+            data_vars=dict(optimal=(("comparison_id",), [optimal]), aligned=(("comparison_id",), [aligned]),
+                offset=(("comparison_id",), [offset]), ccidx=(("comparison_id", "cc_len"), [cc_result.ccidx]),
+                ccplot=(("comparison_id", "cc_len"), [cc_result.ccplot]),
+                peaks=(("comparison_id", "peak_len"), [cc_result.peaks]),
+                peak_vals=(("comparison_id", "peak_len"), [cc_result.peak_vals]),
+                rhi_Z_ds1=(("comparison_id", "z", "x"), [ds1_sub.rhi_Z.values], ds1_sub.rhi_Z.attrs),
+                rhi_Z_ds2=(("comparison_id", "z", "x"), [ds2_sub.rhi_Z.values], ds2_sub.rhi_Z.attrs),
+                offset_thresh=(("comparison_id",), [cc_result.offset_thresh]),
+                half=(("comparison_id",), [cc_result.half]), p95=(("comparison_id",), [cc_result.percentiles['p95']]),
+                p98=(("comparison_id",), [cc_result.percentiles['p98']]),
+                p99=(("comparison_id",), [cc_result.percentiles['p99']]),
+                time1=(("comparison_id",), [str(ds1_sub.time.values)]),
+                time2=(("comparison_id",), [str(ds2_sub.time.values)]), cl1=(("comparison_id",), [cl1]),
+                cl2=(("comparison_id",), [cl2]), ), )
+
+        to_netcdf_tmp_then_copy(ds_out, output_path)
+
+    def get_obj_field_for_stats(objs, cl, field):
+        return get_obj_field(objs, cl, field)
+
+    def _build_stats_entry(ctx, objs1, objs2, w_plane_hr_10dBZ, perp_offset, case, figname):
+        """Assemble the scalar statistics dict for one (cloud pair, parallel offset) combination."""
+        deltaZ = np.roll(ctx.ds2_sub.rhi_Z.values, int(ctx.offset), axis=1) - ctx.ds1_sub.rhi_Z.values
+        deltaZ_20dBZ = deltaZ[ctx.ds1_sub.rhi_Z > 20]
+        return {
+            'case': case,
+            'bracket_idx1': ctx.bracket_idx1, 'bracket_idx2': ctx.bracket_idx2,
+            'time1': pd.Timestamp(ctx.ds1_comp.time.values.item()),
+            'time2': pd.Timestamp(ctx.ds2_comp.time.values.item()),
+            'az_mean1': ctx.ds1_comp.rhi_mean_az.values.mean(),
+            'az_mean2': ctx.ds2_comp.rhi_mean_az.values.mean(),
+            'xmin': ctx.xmin, 'xmax': ctx.xmax, 'zmax': ctx.zmax,
+            'cl1': ctx.cl1, 'cl2': ctx.cl2,
+            'perp_offset': perp_offset, 'parallel_offset': ctx.offset,
+            'optimal_parallel_offset': ctx.optimal, 'aligned_perp_offset': ctx.aligned,
+            'o1_cloud_max_z': get_obj_field(objs1, ctx.cl1, 'cloud_max_z'),
+            'o2_cloud_max_z': get_obj_field(objs2, ctx.cl2, 'cloud_max_z'),
+            'deltaZ_mean': np.nanmean(deltaZ),
+            'deltaZ_absmean': np.nanmean(np.abs(deltaZ)),
+            'deltaZ_posmean': np.nanmean(deltaZ[deltaZ > 0]),
+            'deltaZ_mean_20dBZ': np.nanmean(deltaZ_20dBZ),
+            'deltaZ_absmean_20dBZ': np.nanmean(np.abs(deltaZ_20dBZ)),
+            'deltaZ_posmean_20dBZ': np.nanmean(deltaZ_20dBZ[deltaZ_20dBZ > 0]),
+            '3d_wind_max_w': np.nanmax(w_plane_hr_10dBZ),
+            '3d_wind_mean_w': np.nanmean(w_plane_hr_10dBZ),
+            'figname': str(figname),
+        }
+
+    def process_cloud_match(cl1, cl2, ds1, ds2, ds1_comp, ds2_comp, w_plane_hr,
+                            labels1, labels2, objs1, objs2,
+                            new_beam_idxs, beam_idx1, beam_idx2,
+                            bracket_idx1, bracket_idx2, perp_offset, outputs, case):
+        """Process one cloud pair across all valid parallel offsets.
+
+        Returns a list of stats dicts, one per corr_parallel_offset.
+        """
+        # Use info from both composites to subset fields based on where the overlapping clouds are.
+        (ds1_sub, ds2_sub, w_plane_hr_sub, cloud_union, xmin, xmax, zmax, x_idxmin, x_idxmax,
+         z_idxmax) = subset_fields(cl1, cl2, ds1_comp, ds2_comp, w_plane_hr, labels1, labels2)
+        w_plane_hr_10dBZ = w_plane_hr_sub.values[ds1_sub.rhi_Z > 10]
+
+        # Calc the parallel/perpendicular winds from the flow-derived winds.
+        (wind_parallel_offset, mean_wind_parallel, mean_wind_perpendicular,
+         transect_wind_parallel, transect_wind_perpendicular) = (
+            calc_parallel_perpendicular_winds(ds1_comp, ds2_comp, x_idxmin, x_idxmax))
+        xmid = (xmax + xmin) / 2
+        # beams_aligned: Work out whether the beams are aligned for these objects.
+        aligned = new_beam_idxs[int(round(xmid))] == (beam_idx1, beam_idx2)
+
+        # Calculate the cross correlation between the two composite, subset RHIs.
+        cc_result = calc_cross_correlation(ds1_sub.rhi_Z, ds2_sub.rhi_Z)
+
+        # The cross corr will produce a number of valid offsets (peaks above threshold). Loop over these, and flag
+        # the one closest to the wind-predicted offset as "optimal".
+        # TODO: SCI: smarter ways of calcing optimal: eg including info from flow-derived winds and how strong corr is.
+        stats = []
+        for corr_parallel_offset in cc_result.valid_parallel_offsets:
+            optimal = (corr_parallel_offset == cc_result.valid_parallel_offsets[
+                np.argmin(np.abs(cc_result.valid_parallel_offsets - wind_parallel_offset))])
+
+            # Make a massive context obj to save having lots of arguments for functions.
+            ctx = DeltaZCandidateContext(
+                bracket_idx1=bracket_idx1, bracket_idx2=bracket_idx2,
+                beam_idx1=beam_idx1, beam_idx2=beam_idx2,
+                ds1=ds1, ds2=ds2,
+                ds1_comp=ds1_comp, ds2_comp=ds2_comp,
+                ds1_sub=ds1_sub, ds2_sub=ds2_sub,
+                cl1=cl1, cl2=cl2, cloud_union=cloud_union,
+                labels1=labels1, labels2=labels2,
+                xmin=xmin, xmax=xmax, zmax=zmax,
+                x_idxmin=x_idxmin, x_idxmax=x_idxmax, z_idxmax=z_idxmax,
+                cc_result=cc_result,
+                wind_parallel_offset=wind_parallel_offset,
+                mean_wind_parallel=mean_wind_parallel,
+                mean_wind_perpendicular=mean_wind_perpendicular,
+                transect_wind_parallel=transect_wind_parallel,
+                transect_wind_perpendicular=transect_wind_perpendicular,
+                offset=corr_parallel_offset,
+                optimal=optimal,
+                aligned=aligned,
+            )
+
+            figname = plot_dashboard(outputs, ctx)
+            save_results(outputs, ctx)
+            stats.append(_build_stats_entry(ctx, objs1, objs2, w_plane_hr_10dBZ, perp_offset, case, figname))
+        return stats
+
+    ds1, ds2 = load_data(bracket_idx1, bracket_idx2, inputs)
+    # This will calculate *all* offsets over the length of the beam, taking into account a given wind close to the
+    # radar will shift the 4 beams in each bracket relative to the next bracket by a greater degree than far from
+    # the radar.
+    new_beam_idxs, perp_offsets = find_all_beam_alignment(ds1, ds2)
+
+    dZ_stats = []
+    # Loop over all offsets. This will mean that, for a given pair of clouds in the two composites, the subset
+    # of four beams will either be aligned or not aligned. This is wasteful, because you are calculating the
+    # full set of analysis even when not aligned, but I was not smart enough to figure out how to just do for
+    # aligned. See beams_aligned below.
+    for perp_offset in set(perp_offsets.values()):
+        # Subset the beams based on the offset.
+        s1, s2 = sliding_offset_to_slices(perp_offset)
+        beam_idx1 = tuple(np.arange(4)[s1])
+        beam_idx2 = tuple(np.arange(4)[s2])
+        ds1_comp, ds2_comp = create_composites(ds1, ds2, list(beam_idx1), list(beam_idx2))
+
+        # Go through and find the coherent objects in each composite RHI.
+        labels1, labels2, objs1, objs2 = find_coherent_objects(ds1_comp, ds2_comp)
+
+        # Find the overlaps between the two composite RHIs.
+        matches = find_overlapping_cloud_matches(labels1, labels2, objs1, objs2)
+
+        # Perform matching to 3D winds.
+        matcher = MatchRHIto3dWinds(ds1_comp, time_interp=False)
+        matcher.match()
+        w_plane_hr = matcher.w_plane_hr
+        plotter = Plot3dWinds(matcher)
+        plotter.plot()
+
+        figdir = Path(outputs['fig_dummy']).parent
+        figpath = figdir / f'3d_winds_{perp_offset}.png'
+        logger.debug(figpath)
+        plt.savefig(figpath)
+
+        for cl1, cl2 in matches:
+            dZ_stats.extend(process_cloud_match(
+                cl1, cl2, ds1, ds2, ds1_comp, ds2_comp, w_plane_hr,
+                labels1, labels2, objs1, objs2,
+                new_beam_idxs, beam_idx1, beam_idx2,
+                bracket_idx1, bracket_idx2, perp_offset, outputs, case,
+            ))
+
+    df_dZ_stats = pd.DataFrame(dZ_stats)
+    df_dZ_stats.to_hdf(Path(outputs['dZ_stats']), key='dZ_stats')
+    Path(outputs['fig_dummy']).touch()
+
+
+def gather_delta_z_stats_inputs(case):
     """Gather all scattered stats.hdf files into a single file for each case."""
-    rule_matrix = {'case': conf.CASES}
-
-    @staticmethod
-    def rule_inputs(case):
-        matrix = CompareDeltaZCandidates.rule_matrix()
-        inputs = {}
-        for testcase, bracket_idx1, bracket_idx2 in matrix['case', 'bracket_idx1', 'bracket_idx2']:
-            if testcase != case:
-                continue
-            dz_outputs = CompareDeltaZCandidates.rule_outputs(case, bracket_idx1, bracket_idx2)['dZ_stats']
-            inputs[str(dz_outputs)] = dz_outputs
-        return inputs
-
-    @staticmethod
-    def rule_outputs(case):
-        outdir = conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
-        return {'gathered_dZ_stats': outdir / 'comparison' / 'gathered_dZ_stats.hdf'}
-
-    @staticmethod
-    def rule_run(inputs, outputs, case):
-        outfile = outputs['gathered_dZ_stats']
-        stats_hdfs = list(inputs.values())
-        dfs = [pd.read_hdf(h) for h in stats_hdfs]
-        dfs = [d for d in dfs if not d.empty]
-        df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
-        logger.debug(df)
-        df.to_hdf(outfile, key='gathered_dZ_stats')
+    inputs = {}
+    for row in compare_delta_z_matrix():
+        if row['case'] != case:
+            continue
+        dz_output = compare_delta_z_outputs(row['case'], row['bracket_idx1'], row['bracket_idx2'])['dZ_stats']
+        inputs[str(dz_output)] = dz_output
+    return inputs
 
 
-class MatchRHIsToStorms(Rule):
+def gather_delta_z_stats_outputs(case):
+    outdir = conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
+    return {'gathered_dZ_stats': outdir / 'comparison' / 'gathered_dZ_stats.hdf'}
+
+
+@rule(
+    inputs=gather_delta_z_stats_inputs,
+    outputs=gather_delta_z_stats_outputs,
+    matrix={'case': conf.CASES},
+    depends_on=[compare_delta_z_candidates],
+    uses={'logger': logger},
+)
+def gather_delta_z_stats(inputs, outputs, case):
+    outfile = Path(outputs['gathered_dZ_stats'])
+    stats_hdfs = list(inputs.values())
+    dfs = [pd.read_hdf(h) for h in stats_hdfs]
+    dfs = [d for d in dfs if not d.empty]
+    df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+    logger.debug(df)
+    df.to_hdf(outfile, key='gathered_dZ_stats')
+
+
+def load_data(case, inputs, tracking_precip_thresh):
+    df_candidate_scans = pd.read_hdf(inputs['candidate_scans'])
+
+    year, month, day = int(case[:4]), int(case[4:6]), int(case[6:])
+    datadir = conf.PATHS['datadir'] / 'remake3' / f'radarnet/{year}/{month:02d}/{day:02d}'
+    path = datadir / f'metoffice-c-band-rain-radar_uk_{case}.nc'
+    # All this ensures I'm using the same subdomain as for the tracking.
+    loader = FileLoader([path], chilbolton_centred=True)
+    da_rain = loader.curr_da.load()
+
+    dirpath = conf.PATHS['outdir'] / f'simple_track/{year}/{month:02d}/{day:02d}/'
+    path = list(dirpath.glob(f'storm_labels_*.precip_thresh_{tracking_precip_thresh}.nc'))[0]
+    ds_storms = xr.load_dataset(path)
+
+    path = list(dirpath.glob(f'storm_data_*.precip_thresh_{tracking_precip_thresh}.hdf'))[0]
+    df_storms = pd.read_hdf(path, key='storm_data')
+
+    def add_stage(df, value_col='area', id_col='storm_idx', time_col='time',
+                  frac=0.8, smooth=0):
+        df = df.sort_values([id_col, time_col]).copy()
+
+        def label(g):
+            a = g[value_col].to_numpy(dtype=float)
+            if smooth and len(a) >= smooth:
+                a = pd.Series(a).rolling(smooth, center=True, min_periods=1).median().to_numpy()
+            n = len(a)
+            pk = int(np.argmax(a))
+            thr = frac * a[pk]
+            left, right = pk, pk
+            while left - 1 >= 0 and a[left - 1] >= thr:
+                left -= 1
+            while right + 1 < n and a[right + 1] >= thr:
+                right += 1
+            s = np.full(n, 'growth', dtype=object)
+            s[left:right + 1] = 'mature'
+            s[right + 1:] = 'decay'
+            return pd.Series(s, index=g.index)
+
+        df['stage'] = df.groupby(id_col, group_keys=False).apply(label)
+        return df
+    df_storms = add_stage(df_storms)
+
+    try:
+        df = pd.read_hdf(inputs['gathered_dZ_stats'], key='gathered_dZ_stats')
+    except FileNotFoundError:
+        logger.error('Cannot find gathered stats: you probably need to do a full rerun to generate this')
+        raise
+    # Only keep optimal along beam and aligned across beam.
+    if df.empty:
+        df_dZ_stats = df
+    else:
+        df_dZ_stats = df[df.optimal_parallel_offset & df.aligned_perp_offset]
+    return df_candidate_scans, df_dZ_stats, df_storms, ds_storms, da_rain
+
+
+def match_rhis_to_storms_inputs(case, tracking_precip_thresh, dZ_stats_filters):
+    inputs = find_candidate_delta_z_outputs(case)
+    inputs.update(gather_delta_z_stats_outputs(case))
+    return inputs
+
+
+def match_rhis_to_storms_outputs(case, tracking_precip_thresh, dZ_stats_filters):
+    outdir = conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
+    return {'match_rhi_storm_stats': (outdir / 'rhi_storm_match' /
+                                      f'tracking_precip_thresh_{tracking_precip_thresh}' /
+                                      f'match_rhi_storm_stats.{dZ_stats_filters}.hdf')}
+
+
+@rule(
+    inputs=match_rhis_to_storms_inputs,
+    outputs=match_rhis_to_storms_outputs,
+    matrix={'case': conf.CASES, 'tracking_precip_thresh': [1., 3., 5.], 'dZ_stats_filters': ['all_cloud', 'high_cloud']},
+    depends_on=[gather_delta_z_stats],
+    uses={
+        'CHIL_X': CHIL_X,
+        'CHIL_Y': CHIL_Y,
+        'load_data': load_data,
+        'sliding_offset_to_slices': sliding_offset_to_slices,
+        'logger': logger,
+    },
+)
+def match_rhis_to_storms(inputs, outputs, case, tracking_precip_thresh, dZ_stats_filters):
     """For the deltaZ candidates, match the scans (first and second) to the radarnet tracked storms."""
-    rule_matrix = {
-        'case': conf.CASES,
-        'tracking_precip_thresh': [1., 3., 5.],
-        'dZ_stats_filters': ['all_cloud', 'high_cloud']
-    }
 
-    @staticmethod
-    def rule_inputs(case, tracking_precip_thresh, dZ_stats_filters):
-        inputs = FindCandidateDeltaZ.rule_outputs(case)
-        inputs.update(GatherDeltaZStats.rule_outputs(case))
-        return inputs
-
-    @staticmethod
-    def rule_outputs(case, tracking_precip_thresh, dZ_stats_filters):
-        outdir = conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
-        return {'match_rhi_storm_stats': (outdir / 'rhi_storm_match' /
-                                          f'tracking_precip_thresh_{tracking_precip_thresh}' /
-                                          f'match_rhi_storm_stats.{dZ_stats_filters}.hdf')}
-
-    @staticmethod
     def storm_label_to_idx(df, time, label):
         storm_row = df[(df.time == time) & (df.storm_label_idx.values == label)]
         assert len(storm_row) == 1
         return int(storm_row.iloc[0].storm_idx)
 
-    @staticmethod
-    def rule_run(inputs, outputs, case, tracking_precip_thresh, dZ_stats_filters):
-        # figdir = outputs['match_rhi_storm_stats'].parent
-        df_candidate_scans, df_dZ_stats, df_storms, ds_storms = MatchRHIsToStorms.load_data(case, inputs, tracking_precip_thresh)
-        if dZ_stats_filters == 'all_cloud':
-            pass
-        elif dZ_stats_filters == 'high_cloud':
-            if not df_dZ_stats.empty:
-                df_dZ_stats = df_dZ_stats[df_dZ_stats.o1_cloud_max_z > 4]
-
-        df_data = []
-
-        for i in range(len(df_dZ_stats)):
-            # logger.info(f'{i + 1}/{len(df_dZ_stats)}')
-            # fields available can be seen in stats_entry
-            row = df_dZ_stats.iloc[i]
-            xmin = row.xmin
-            xmax = row.xmax
-
-            ds_sub = MatchRHIsToStorms.load_rhis(df_candidate_scans, row, xmin, xmax)
-            transect_dist = np.arange(xmin, xmax) * 1e3  # km to m.
-
-            for scan_idx in [1, 2]:
-                time = row[f'time{scan_idx}']
-                storm_labels = ds_storms.storm_labels.sel(time=time, method='nearest')
-                storm_time = pd.Timestamp(storm_labels.time.values.item())
-
-                az_mean = row[f'az_mean{scan_idx}']
-
-                # Find the labels by doing nearest neighbour interp along transect.
-                transect_x = xr.DataArray(transect_dist * np.sin(az_mean * np.pi / 180) + CHIL_X, dims='transect')
-                transect_y = xr.DataArray(transect_dist * np.cos(az_mean * np.pi / 180) + CHIL_Y, dims='transect')
-                transect_labels = storm_labels.interp(eastings=transect_x, northings=transect_y, method='nearest')
-
-                unique_storm_labels = np.unique(transect_labels.values)
-                unique_storm_labels = unique_storm_labels[unique_storm_labels != 0]
-
-                precip_along_beam = ds_storms.rain.sel(time=time, method='nearest').interp(eastings=transect_x, northings=transect_y, method='linear')
-                mean_precip_along_beam = precip_along_beam.mean().values.item()
-                df_data.append({
-                    'dZ_stats_idx': row.name,
-                    'scan_idx': scan_idx,
-                    'rhi_time': time,
-                    'storm_time': storm_time,
-                    'mean_precip_along_beam': mean_precip_along_beam,
-                    'nstorms': len(unique_storm_labels),
-                    **{f'storm_label{j + 1}': int(unique_storm_labels[j]) for j in range(len(unique_storm_labels))},
-                    **{f'storm_idx{j + 1}': MatchRHIsToStorms.storm_label_to_idx(df_storms, storm_time, unique_storm_labels[j])
-                       for j in range(len(unique_storm_labels))},
-                })
-                logger.debug(df_data[-1])
-
-                # MatchRHIsToStorms.plot_rhi_storm_intersections(ds_storms.rain, ds_sub, i, figdir, scan_idx, storm_labels, time,
-                #                                                transect_x, transect_y, unique_storm_labels, xmax, xmin)
-        df_rhi_storm_stats = pd.DataFrame(df_data)
-        logger.debug(df_rhi_storm_stats)
-        df_rhi_storm_stats.to_hdf(outputs['match_rhi_storm_stats'], key='match_rhi_storm_stats')
-
-    @staticmethod
-    def load_data(case, inputs, tracking_precip_thresh):
-        df_candidate_scans = pd.read_hdf(inputs['candidate_scans'])
-
-        year, month, day = int(case[:4]), int(case[4:6]), int(case[6:])
-        datadir = conf.PATHS['datadir'] / f'radarnet/{year}/{month:02d}/{day:02d}'
-        path = datadir / f'metoffice-c-band-rain-radar_uk_{case}.nc'
-        # All this ensures I'm using the same subdomain as for the tracking.
-        loader = FileLoader([path], chilbolton_centred=True)
-        da = loader.curr_da.load()
-
-        dirpath = conf.PATHS['datadir'] / f'upflo_wp1_output/simple_track/{year}/{month:02d}/{day:02d}/'
-        path = list(dirpath.glob(f'storm_labels_*.precip_thresh_{tracking_precip_thresh}.nc'))[0]
-        ds_storms = xr.load_dataset(path)
-        ds_storms['rain'] = da
-
-        path = list(dirpath.glob(f'storm_data_*.precip_thresh_{tracking_precip_thresh}.hdf'))[0]
-        df_storms = pd.read_hdf(path, key='storm_data')
-        ds_storms['rain'] = da
-
-        try:
-            df = pd.read_hdf(inputs['gathered_dZ_stats'], key='gathered_dZ_stats')
-        except FileNotFoundError as e:
-            logger.error('Cannot find gathered stats: you probably need to do a full rerun to generate this')
-            raise
-        # Only keep optimal along beam and aligned across beam.
-        if df.empty:
-            df_dZ_stats = df
-        else:
-            df_dZ_stats = df[df.optimal_parallel_offset & df.aligned_perp_offset]
-        return df_candidate_scans, df_dZ_stats, df_storms, ds_storms
-
-    @staticmethod
     def load_rhis(df_candidate_scans, row, xmin, xmax):
         b1paths = df_candidate_scans[df_candidate_scans.bracket == row.bracket_idx1]['path'].values
         b2paths = df_candidate_scans[df_candidate_scans.bracket == row.bracket_idx2]['path'].values
@@ -1547,36 +1535,91 @@ class MatchRHIsToStorms(Rule):
         }
         return ds_sub
 
-    @staticmethod
-    def plot_rhi_storm_intersections(da, ds_sub, i, figdir, scan_idx, storm_labels, time, transect_x, transect_y,
-                                     unique_storm_labels, xmax, xmin):
-        fig = plt.figure(layout='constrained', figsize=(16, 12))
-        gs = gridspec.GridSpec(ncols=2, nrows=1, figure=fig)
-        ax1 = fig.add_subplot(gs[0, 0], projection=CustomOSGB())
-        ax2 = fig.add_subplot(gs[0, 1])
+    df_candidate_scans, df_dZ_stats, df_storms, ds_storms, da_rain = load_data(case, inputs, tracking_precip_thresh)
+    if dZ_stats_filters == 'all_cloud':
+        pass
+    elif dZ_stats_filters == 'high_cloud':
+        if not df_dZ_stats.empty:
+            df_dZ_stats = df_dZ_stats[df_dZ_stats.o1_cloud_max_z > 4]
 
-        # fig, ax = plt.subplots(1, 1, subplot_kw=dict(projection=CustomOSGB()), figsize=(15, 15), layout='constrained')
-        ax1.coastlines()
-        L = xmax * 1e3 - xmin * 1e3 + 5e3
-        mid_x = (transect_x[0] + transect_x[-1]) / 2
-        mid_y = (transect_y[0] + transect_y[-1]) / 2
-        ax1.set_xlim((mid_x - L, mid_x + L))
-        ax1.set_ylim((mid_y - L, mid_y + L))
+    df_data = []
 
-        # ax1.pcolormesh(storm_labels.eastings, storm_labels.northings, ds.rain.sel(time=time, method='nearest'))
-        levels = [0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64]
-        colors = ((0, 0, 0.6), 'b', 'c', 'g', 'y', (1, 0.5, 0), 'r', 'm', (0.6, 0.6, 0.6))
+    for i in range(len(df_dZ_stats)):
+        # fields available can be seen in stats_entry
+        row = df_dZ_stats.iloc[i]
+        xmin = row.xmin
+        xmax = row.xmax
 
-        ax1.contourf(da.eastings, da.northings, da.sel(time=time, method='nearest'), levels=levels, colors=colors)
-        for label in unique_storm_labels:
-            pdata = storm_labels.values == label
-            pdata = np.ma.masked_array(pdata, pdata == 0)
-            ax1.pcolormesh(storm_labels.eastings, storm_labels.northings, pdata)
-        ax1.plot(transect_x, transect_y)
+        ds_sub = load_rhis(df_candidate_scans, row, xmin, xmax)
+        transect_dist = np.arange(xmin, xmax) * 1e3  # km to m.
 
-        ax2.pcolormesh(ds_sub[scan_idx].x, ds_sub[scan_idx].z, ds_sub[scan_idx].rhi_Z, vmin=-10, vmax=60)
-        plt.savefig(figdir / f'rhi_storm_match.{i}.{scan_idx}.png')
-        plt.close('all')
+        for scan_idx in [1, 2]:
+            time = row[f'time{scan_idx}']
+            storm_labels = ds_storms.storm_labels.sel(time=time, method='nearest')
+            storm_time = pd.Timestamp(storm_labels.time.values.item())
+
+            az_mean = row[f'az_mean{scan_idx}']
+
+            # Find the labels by doing nearest neighbour interp along transect.
+            transect_x = xr.DataArray(transect_dist * np.sin(az_mean * np.pi / 180) + CHIL_X, dims='transect')
+            transect_y = xr.DataArray(transect_dist * np.cos(az_mean * np.pi / 180) + CHIL_Y, dims='transect')
+            transect_labels = storm_labels.interp(eastings=transect_x, northings=transect_y, method='nearest')
+
+            unique_storm_labels = np.unique(transect_labels.values)
+            unique_storm_labels = unique_storm_labels[unique_storm_labels != 0]
+
+            precip_along_beam = (
+                da_rain
+                .interp(time=time, method='linear')
+                .interp(eastings=transect_x, northings=transect_y, method='linear')
+            )
+            mean_precip_along_beam = precip_along_beam.mean().values.item()
+            df_data.append({
+                'dZ_stats_idx': row.name,
+                'scan_idx': scan_idx,
+                'rhi_time': time,
+                'storm_time': storm_time,
+                'mean_precip_along_beam': mean_precip_along_beam,
+                'nstorms': len(unique_storm_labels),
+                **{f'storm_label{j + 1}': int(unique_storm_labels[j]) for j in range(len(unique_storm_labels))},
+                **{f'storm_idx{j + 1}': storm_label_to_idx(df_storms, storm_time, unique_storm_labels[j])
+                   for j in range(len(unique_storm_labels))},
+            })
+            logger.debug(df_data[-1])
+
+    df_rhi_storm_stats = pd.DataFrame(df_data)
+    logger.debug(df_rhi_storm_stats)
+    df_rhi_storm_stats.to_hdf(Path(outputs['match_rhi_storm_stats']), key='match_rhi_storm_stats')
+
+
+def plot_rhi_storm_intersections(da, ds_sub, i, figdir, scan_idx, storm_labels, time, transect_x, transect_y,
+                                  unique_storm_labels, xmax, xmin):
+    fig = plt.figure(layout='constrained', figsize=(16, 12))
+    gs = gridspec.GridSpec(ncols=2, nrows=1, figure=fig)
+    ax1 = fig.add_subplot(gs[0, 0], projection=CustomOSGB())
+    ax2 = fig.add_subplot(gs[0, 1])
+
+    ax1.coastlines()
+    L = xmax * 1e3 - xmin * 1e3 + 5e3
+    mid_x = (transect_x[0] + transect_x[-1]) / 2
+    mid_y = (transect_y[0] + transect_y[-1]) / 2
+    ax1.set_xlim((mid_x - L, mid_x + L))
+    ax1.set_ylim((mid_y - L, mid_y + L))
+
+    levels = [0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64]
+    colors = ((0, 0, 0.6), 'b', 'c', 'g', 'y', (1, 0.5, 0), 'r', 'm', (0.6, 0.6, 0.6))
+
+    ax1.contourf(da.eastings, da.northings, da.sel(time=time, method='nearest'), levels=levels, colors=colors)
+    for label in unique_storm_labels:
+        pdata = storm_labels.values == label
+        pdata = np.ma.masked_array(pdata, pdata == 0)
+        ax1.pcolormesh(storm_labels.eastings, storm_labels.northings, pdata)
+    ax1.plot(transect_x, transect_y)
+
+    ax2.pcolormesh(ds_sub[scan_idx].x, ds_sub[scan_idx].z, ds_sub[scan_idx].rhi_Z, vmin=-10, vmax=60)
+    plt.savefig(figdir / f'rhi_storm_match.{i}.{scan_idx}.png')
+    plt.close('all')
+
 
 def annotate_fit_with_line(x, y, **kws):
     # clean data
@@ -1605,148 +1648,270 @@ def annotate_fit_with_line(x, y, **kws):
                 bbox=dict(boxstyle="round,pad=0.3", fc=face_colour, ec=edge_colour, lw=line_width, alpha=0.5))
 
 
-class AnalyseMatchRHIsToStorms(Rule):
-    rule_matrix = {
-        'case': conf.CASES,
-        # 'tracking_precip_thresh': [1., 3., 5.],
-        # 'dZ_stats_filters': ['all_cloud', 'high_cloud']
+def plot_full_corr_matrix(case, tracking_precip_thresh, dZ_stats_filters, df_analysis_matches, outputs):
+    figdir = Path(outputs['fig_dummy']).parent
+    # Skip settings, match_idx and dt.
+    cols = df_analysis_matches.columns.tolist()[3:]
+    xcols = [c for c in cols if c.startswith('deltaZ')]
+    ycols = [c for c in cols if not (c.startswith('deltaZ')) and c not in ['case', 'stage']]
+
+    # If only showing partial set.
+    g = sns.pairplot(df_analysis_matches[cols], x_vars=xcols, y_vars=ycols, diag_kind='kde')
+    g.map(annotate_fit_with_line)
+    g.figure.suptitle(f'{case} thresh={tracking_precip_thresh} {dZ_stats_filters} N={len(df_analysis_matches)}')
+    g.figure.subplots_adjust(top=0.96)
+    figpath = figdir / f'analysis_match_rhi_storm_stats.corr.{case}.thresh_{tracking_precip_thresh}.{dZ_stats_filters}.png'
+    logger.info(f'saving to {figpath}')
+    plt.savefig(figpath)
+
+
+def append_analysis_stats(key, df_dZ_stats, df_rhi_storm_stats, df_storms, analysis_stats):
+    for i in range(0, len(df_rhi_storm_stats), 2):
+        if i % 100 == 0:
+            logger.debug(f'{i + 1}/{len(df_rhi_storm_stats)}')
+        match = df_rhi_storm_stats.iloc[i]
+        # Note, df_rhi_storm_stats contains info for the first and second composite RHI in each dZ candidate.
+        # Only calc stats for the first, and use the second to calc only the change in along-beam precip.
+        match2 = df_rhi_storm_stats.iloc[i + 1]
+        row_stats = df_dZ_stats.loc[match.dZ_stats_idx]
+        if 'storm_idx1' not in match.index:
+            continue
+        # This is *all* the rows for the given storm.
+        df_storm = df_storms[df_storms.storm_idx == match.storm_idx1]
+        row_mask = df_storm.time == match.storm_time
+        if match.rhi_time > match.storm_time:
+            df_storms_either_side = df_storm[row_mask | row_mask.shift(1)].copy()
+        else:
+            df_storms_either_side = df_storm[row_mask | row_mask.shift(-1)].copy()
+
+        if len(df_storms_either_side) != 2:
+            # This can happen if the storm is at the beginning/end of its life.
+            logger.debug('only one storm cloud found')
+            continue
+
+        row_delta = df_storms_either_side[['time', 'area', 'extreme', 'meanfield']].diff().iloc[-1]
+        dt = row_delta.time.seconds
+        analysis_stats.append({
+            'settings': key,
+            'match_idx': i,
+            'dt': dt,
+            # Correlation plot will be done on everything past here.
+            'area': df_storms_either_side.iloc[0].area,
+            'extreme_precip': df_storms_either_side.iloc[0].extreme,
+            'mean_precip': df_storms_either_side.iloc[0].meanfield,
+            'stage': df_storms_either_side.iloc[0].stage,
+            'darea_dt': row_delta.area / dt,
+            'dextreme_precip_dt': row_delta.extreme / dt,
+            'dmean_precip_dt': row_delta.meanfield / dt,
+            'mean_precip_along_beam': (match.mean_precip_along_beam + match2.mean_precip_along_beam) / 2,
+            'delta_precip_along_beam': (match2.mean_precip_along_beam - match.mean_precip_along_beam) / dt,
+            'deltaZ_mean': row_stats.deltaZ_mean,
+            'deltaZ_absmean': row_stats.deltaZ_absmean,
+            'deltaZ_posmean': row_stats.deltaZ_posmean,
+            'deltaZ_mean_20dBZ': row_stats.deltaZ_mean_20dBZ,
+            'deltaZ_absmean_20dBZ': row_stats.deltaZ_absmean_20dBZ,
+            'deltaZ_posmean_20dBZ': row_stats.deltaZ_posmean_20dBZ,
+        })
+
+
+def analyse_match_rhis_to_storms_inputs(case):
+    inputs = find_candidate_delta_z_outputs(case)
+    inputs.update(gather_delta_z_stats_outputs(case))
+    for tracking_precip_thresh, dZ_stats_filters in product([1., 3., 5.], ['all_cloud', 'high_cloud']):
+        key2 = f'_{tracking_precip_thresh}_{dZ_stats_filters}'
+        match_output = match_rhis_to_storms_outputs(case, tracking_precip_thresh, dZ_stats_filters)
+        inputs.update({k + key2: v for k, v in match_output.items()})
+    return inputs
+
+
+def analyse_match_rhis_to_storms_outputs(case):
+    outdir = conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
+    figdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
+    return {
+        'analyse_match_rhi_storm_stats': (outdir / 'rhi_storm_match' / f'tracking_precip_thresh' /
+                                          f'analyse_match_rhi_storm_stats.hdf'),
+        'fig_dummy': (figdir / 'rhi_storm_match' / f'tracking_precip_thresh' / f'fig_dummy.out'),
     }
 
-    @staticmethod
-    def rule_inputs(case):
-        inputs = FindCandidateDeltaZ.rule_outputs(case)
-        inputs.update(GatherDeltaZStats.rule_outputs(case))
-        for tracking_precip_thresh, dZ_stats_filters in product([1., 3., 5.], ['all_cloud', 'high_cloud']):
-            key2 = f'_{tracking_precip_thresh}_{dZ_stats_filters}'
-            match_output = MatchRHIsToStorms.rule_outputs(case, tracking_precip_thresh, dZ_stats_filters)
-            inputs.update({k + key2: v for k, v in match_output.items()})
-        return inputs
 
-    @staticmethod
-    def rule_outputs(case):
-        outdir = conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
-        figdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
-        return {
-            'analyse_match_rhi_storm_stats': (outdir / 'rhi_storm_match' / f'tracking_precip_thresh' /
-                                              f'analyse_match_rhi_storm_stats.hdf'),
-            'fig_dummy': (figdir / 'rhi_storm_match' / f'tracking_precip_thresh' / f'fig_dummy.out'),
-        }
+@rule(
+    inputs=analyse_match_rhis_to_storms_inputs,
+    outputs=analyse_match_rhis_to_storms_outputs,
+    matrix={'case': conf.CASES},
+    depends_on=[match_rhis_to_storms],
+    uses={
+        'load_data': load_data,
+        'append_analysis_stats': append_analysis_stats,
+        'plot_full_corr_matrix': plot_full_corr_matrix,
+        'annotate_fit_with_line': annotate_fit_with_line,
+        'logger': logger,
+    },
+)
+def analyse_match_rhis_to_storms(inputs, outputs, case):
+    logger.info(case)
+    analysis_stats = []
+    for tracking_precip_thresh in [1., 3., 5.]:
+        _, df_dZ_stats, df_storms, _, _ = load_data(case, inputs, tracking_precip_thresh)
+        for dZ_stats_filters in ['all_cloud', 'high_cloud']:
+            key = f'{tracking_precip_thresh}_{dZ_stats_filters}'
+            logger.info(key)
 
-    @staticmethod
-    def rule_run(inputs, outputs, case):
-        logger.debug(case)
-        analysis_stats = []
-        for tracking_precip_thresh in [1., 3., 5.]:
-            df_candidate_scans, df_dZ_stats, df_storms, ds_storms = MatchRHIsToStorms.load_data(case, inputs,
-                                                                                                tracking_precip_thresh)
-            for dZ_stats_filters in ['all_cloud', 'high_cloud']:
-                key = f'{tracking_precip_thresh}_{dZ_stats_filters}'
-                logger.info(key)
+            df_rhi_storm_stats = pd.read_hdf(inputs['match_rhi_storm_stats_' + key], key='match_rhi_storm_stats')
 
-                df_rhi_storm_stats = pd.read_hdf(inputs['match_rhi_storm_stats_' + key], key='match_rhi_storm_stats')
+            append_analysis_stats(key, df_dZ_stats, df_rhi_storm_stats, df_storms, analysis_stats)
 
-                AnalyseMatchRHIsToStorms.append_analysis_stats(key, df_dZ_stats, df_rhi_storm_stats, df_storms,
-                                                               analysis_stats)
+    df_analysis_matches_full = pd.DataFrame(analysis_stats)
+    df_analysis_matches_full['case'] = case
 
-        df_analysis_matches_full = pd.DataFrame(analysis_stats)
+    if len(df_analysis_matches_full) < 10 or df_analysis_matches_full.empty:
+        logger.warning(f'No analysis matches found for {case} — skipping plots')
+        pd.DataFrame().to_hdf(Path(outputs['analyse_match_rhi_storm_stats']), key='analyse_match_rhi_storm_stats')
+        Path(outputs['fig_dummy']).touch()
+        return
 
+    for tracking_precip_thresh, dZ_stats_filters in product([1., 3., 5.], ['all_cloud', 'high_cloud']):
+        key = f'{tracking_precip_thresh}_{dZ_stats_filters}'
+        df_analysis_matches = df_analysis_matches_full[df_analysis_matches_full.settings == key]
+
+        plot_full_corr_matrix(case, tracking_precip_thresh, dZ_stats_filters, df_analysis_matches, outputs)
+
+    fig, axes = plt.subplots(1, 6, figsize=(20, 4), layout='constrained')
+    for ax, (tracking_precip_thresh, dZ_stats_filters) in zip(axes, product([1., 3., 5.], ['all_cloud', 'high_cloud'])):
+        key = f'{tracking_precip_thresh}_{dZ_stats_filters}'
+        df_analysis_matches = df_analysis_matches_full[df_analysis_matches_full.settings == key]
+        ax.scatter(df_analysis_matches.area, df_analysis_matches.deltaZ_mean_20dBZ)
+        annotate_fit_with_line(df_analysis_matches.area, df_analysis_matches.deltaZ_mean_20dBZ, ax=ax)
+
+        ax.set_title(f'{dZ_stats_filters} thresh={tracking_precip_thresh}')
+        ax.set_xlabel('area')
+        if ax == axes[0]:
+            ax.set_ylabel('deltaZ_mean_20dBZ')
+
+    figdir = Path(outputs['fig_dummy']).parent
+    figpath = figdir / f'analysis_match_rhi_storm_stats.corr.area.deltaZ_mean_20dBZ.png'
+    Path(outputs['fig_dummy']).touch()
+    logger.info(f'saving to {figpath}')
+    plt.savefig(figpath)
+
+    df_analysis_matches_full.to_hdf(Path(outputs['analyse_match_rhi_storm_stats']), key='analyse_match_rhi_storm_stats')
+
+
+def analyse_all_match_rhis_to_storms_inputs():
+    inputs = {}
+    for case in conf.CASES:
+        case_outputs = analyse_match_rhis_to_storms_outputs(case)
+        inputs[f'{case}_analyse_match_rhi_storm_stats'] = case_outputs['analyse_match_rhi_storm_stats']
+    return inputs
+
+
+def analyse_all_match_rhis_to_storms_outputs():
+    figdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / 'all' / 'camra' / 'deltaZ_candidate'
+    return {
+        'fig_dummy': (figdir / 'rhi_storm_match' / 'tracking_precip_thresh' / 'fig_dummy.out'),
+    }
+
+
+@rule(
+    inputs=analyse_all_match_rhis_to_storms_inputs,
+    outputs=analyse_all_match_rhis_to_storms_outputs,
+    depends_on=[analyse_match_rhis_to_storms],
+    uses={
+        'plot_full_corr_matrix': plot_full_corr_matrix,
+        'annotate_fit_with_line': annotate_fit_with_line,
+        'chi2': chi2,
+        'logger': logger,
+    },
+)
+def analyse_all_match_rhis_to_storms(inputs, outputs):
+    dfs = []
+    for case in conf.CASES:
+        df_analysis_matches_full = pd.read_hdf(inputs[f'{case}_analyse_match_rhi_storm_stats'],
+                                                key='analyse_match_rhi_storm_stats')
         if df_analysis_matches_full.empty:
-            logger.warning(f'No analysis matches found for {case} — skipping plots')
-            pd.DataFrame().to_hdf(outputs['analyse_match_rhi_storm_stats'], key='analyse_match_rhi_storm_stats')
-            outputs['fig_dummy'].touch()
-            return
+            logger.warning(f'No analysis matches found for {case} — skipping')
+            continue
+        dfs.append(df_analysis_matches_full)
 
-        for tracking_precip_thresh, dZ_stats_filters in product([1., 3., 5.], ['all_cloud', 'high_cloud']):
-            key = f'{tracking_precip_thresh}_{dZ_stats_filters}'
-            df_analysis_matches = df_analysis_matches_full[df_analysis_matches_full.settings == key]
+    if not dfs:
+        logger.warning('No analysis matches found for any case — skipping plots')
+        Path(outputs['fig_dummy']).touch()
+        return
 
-            AnalyseMatchRHIsToStorms.plot_full_corr_matrix(case, tracking_precip_thresh, dZ_stats_filters,
-                                                           df_analysis_matches, outputs)
+    df_analysis_matches_full = pd.concat(dfs, ignore_index=True)
 
-        fig, axes = plt.subplots(1, 6, figsize=(20, 4), layout='constrained')
-        for ax, (tracking_precip_thresh, dZ_stats_filters) in zip(axes, product([1., 3., 5.], ['all_cloud', 'high_cloud'])):
-            key = f'{tracking_precip_thresh}_{dZ_stats_filters}'
-            df_analysis_matches = df_analysis_matches_full[df_analysis_matches_full.settings == key]
-            ax.scatter(df_analysis_matches.area, df_analysis_matches.deltaZ_mean_20dBZ)
-            annotate_fit_with_line(df_analysis_matches.area, df_analysis_matches.deltaZ_mean_20dBZ, ax=ax)
+    # This code is from Gemini. See this conversation: https://gemini.google.com/app/2e11a09d16a660ea
 
-            ax.set_title(f'{dZ_stats_filters} thresh={tracking_precip_thresh}')
-            ax.set_xlabel('area')
-            if ax == axes[0]:
-                ax.set_ylabel('deltaZ_mean_20dBZ')
+    # 1. Create a copy to safely add standardized columns
+    df = df_analysis_matches_full.copy()
 
-        figdir = outputs['fig_dummy'].parent
-        figpath = figdir / f'analysis_match_rhi_storm_stats.corr.area.deltaZ_mean_20dBZ.png'
-        outputs['fig_dummy'].touch()
-        logger.info(f'saving to {figpath}')
-        plt.savefig(figpath)
+    # 2. Standardize both variables (z-score: (x - mean) / std)
+    df['precip_std'] = (df['delta_precip_along_beam'] - df['delta_precip_along_beam'].mean()) / df[
+        'delta_precip_along_beam'].std()
+    df['deltaZ_std'] = (df['deltaZ_mean'] - df['deltaZ_mean'].mean()) / df['deltaZ_mean'].std()
 
-        df_analysis_matches_full.to_hdf(outputs['analyse_match_rhi_storm_stats'], key='analyse_match_rhi_storm_stats')
+    # 3. Fit Null Model (fixed slope, random intercept) using the standardized variables
+    m0 = smf.mixedlm(
+        "precip_std ~ deltaZ_std",
+        df,
+        groups=df["case"]
+    ).fit(reml=False)
 
-    @staticmethod
-    def plot_full_corr_matrix(case, tracking_precip_thresh, dZ_stats_filters, df_analysis_matches, outputs):
-        figdir = outputs['fig_dummy'].parent
-        # Skip settings, match_idx and dt.
-        cols = df_analysis_matches.columns.tolist()[3:]
-        xcols = [c for c in cols if not c.startswith('deltaZ')]
-        ycols = [c for c in cols if c.startswith('deltaZ')]
+    # 4. Fit Alternative Model (random intercept AND random slope)
+    m1 = smf.mixedlm(
+        "precip_std ~ deltaZ_std",
+        df,
+        groups=df["case"],
+        re_formula="~deltaZ_std"
+    ).fit(reml=False)
 
-        # If showing full set of correlations.
-        # g = sns.pairplot(df_analysis_matches[cols], x_vars=xcols, y_vars=ycols, diag_kind='kde', corner=True)
-        # g.map_lower(annotate_fit_with_line)
-        # If only showing partial set.
-        g = sns.pairplot(df_analysis_matches[cols], x_vars=xcols, y_vars=ycols, diag_kind='kde')
-        g.map(annotate_fit_with_line)
-        g.figure.suptitle(f'{case} thresh={tracking_precip_thresh} {dZ_stats_filters}')
-        g.figure.subplots_adjust(top=0.96)
-        figpath = figdir / f'analysis_match_rhi_storm_stats.corr.{case}.thresh_{tracking_precip_thresh}.{dZ_stats_filters}.png'
-        logger.info(f'saving to {figpath}')
-        plt.savefig(figpath)
+    # 5. Likelihood Ratio Test
+    lrt_stat = 2 * (m1.llf - m0.llf)
+    df_diff = m1.df_modelwc - m0.df_modelwc
+    p_val = chi2.sf(lrt_stat, df=df_diff)
 
-    @staticmethod
-    def append_analysis_stats(key, df_dZ_stats, df_rhi_storm_stats, df_storms, analysis_stats):
-        for i in range(0, len(df_rhi_storm_stats), 2):
-            if i % 100 == 0:
-                logger.debug(f'{i + 1}/{len(df_rhi_storm_stats)}')
-            match = df_rhi_storm_stats.iloc[i]
-            # Note, df_rhi_storm_stats contains info for the first and second composite RHI in each dZ candidate.
-            # Only calc stats for the first, and use the second to calc only the change in along-beam precip.
-            match2 = df_rhi_storm_stats.iloc[i + 1]
-            row_stats = df_dZ_stats.loc[match.dZ_stats_idx]
-            if 'storm_idx1' not in match.index:
-                continue
-            # This is *all* the rows for the given storm.
-            df_storm = df_storms[df_storms.storm_idx == match.storm_idx1]
-            row_mask = df_storm.time == match.storm_time
-            if match.rhi_time > match.storm_time:
-                df_storms_either_side = df_storm[row_mask | row_mask.shift(1)].copy()
-            else:
-                df_storms_either_side = df_storm[row_mask | row_mask.shift(-1)].copy()
+    print(f"LRT Statistic: {lrt_stat:.2f}")
+    print(f"p-value for heterogeneity: {p_val:.2e}")
+    print("\n--- Alternative Model Summary (Standardized) ---")
+    print(m1.summary())
 
-            if len(df_storms_either_side) != 2:
-                # This can happen if the storm is at the beginning/end of its life.
-                logger.debug('only one storm cloud found')
-                continue
+    for tracking_precip_thresh, dZ_stats_filters in product([1., 3., 5.], ['all_cloud', 'high_cloud']):
+        key = f'{tracking_precip_thresh}_{dZ_stats_filters}'
+        df_analysis_matches = df_analysis_matches_full[df_analysis_matches_full.settings == key]
 
-            row_delta = df_storms_either_side[['time', 'area', 'extreme', 'meanfield']].diff().iloc[-1]
-            dt = row_delta.time.seconds
-            analysis_stats.append({
-                'settings': key,
-                'match_idx': i,
-                'dt': dt,
-                # Correlation plot will be done on everything past here.
-                'area': df_storms_either_side.iloc[0].area,
-                'extreme_precip': df_storms_either_side.iloc[0].extreme,
-                'mean_precip': df_storms_either_side.iloc[0].meanfield,
-                'darea_dt': row_delta.area / dt,
-                'dextreme_precip_dt': row_delta.extreme / dt,
-                'dmean_precip_dt': row_delta.meanfield / dt,
-                'mean_precip_along_beam': (match.mean_precip_along_beam + match2.mean_precip_along_beam) / 2,
-                'delta_precip_along_beam': (match2.mean_precip_along_beam - match.mean_precip_along_beam) / dt,
-                'deltaZ_mean': row_stats.deltaZ_mean,
-                'deltaZ_absmean': row_stats.deltaZ_absmean,
-                'deltaZ_posmean': row_stats.deltaZ_posmean,
-                'deltaZ_mean_20dBZ': row_stats.deltaZ_mean_20dBZ,
-                'deltaZ_absmean_20dBZ': row_stats.deltaZ_absmean_20dBZ,
-                'deltaZ_posmean_20dBZ': row_stats.deltaZ_posmean_20dBZ,
-            })
+        plot_full_corr_matrix('all', tracking_precip_thresh, dZ_stats_filters, df_analysis_matches, outputs)
+
+        for stage in ['growth', 'mature', 'decay']:
+            df_analysis_matches_stage = df_analysis_matches[df_analysis_matches.stage == stage]
+
+            plot_full_corr_matrix(f'all_{stage}', tracking_precip_thresh, dZ_stats_filters,
+                                  df_analysis_matches_stage, outputs)
+
+    fig, axes = plt.subplots(1, 6, figsize=(20, 4), layout='constrained')
+    for ax, (tracking_precip_thresh, dZ_stats_filters) in zip(axes, product([1., 3., 5.], ['all_cloud', 'high_cloud'])):
+        key = f'{tracking_precip_thresh}_{dZ_stats_filters}'
+        df_analysis_matches = df_analysis_matches_full[df_analysis_matches_full.settings == key]
+        ax.scatter(df_analysis_matches.area, df_analysis_matches.deltaZ_mean_20dBZ)
+        annotate_fit_with_line(df_analysis_matches.area, df_analysis_matches.deltaZ_mean_20dBZ, ax=ax)
+
+        ax.set_title(f'{dZ_stats_filters} thresh={tracking_precip_thresh}')
+        ax.set_xlabel('area')
+        if ax == axes[0]:
+            ax.set_ylabel('deltaZ_mean_20dBZ')
+
+    figdir = Path(outputs['fig_dummy']).parent
+    figpath = figdir / 'analysis_match_rhi_storm_stats.corr.area.deltaZ_mean_20dBZ.png'
+    Path(outputs['fig_dummy']).touch()
+    logger.info(f'saving to {figpath}')
+    plt.savefig(figpath)
+
+
+rmk.add_rules([
+    regrid_camra_kepler_l1,
+    plot_regridded_camra_kepler_l1,
+    find_candidate_delta_z,
+    compare_delta_z_candidates,
+    gather_delta_z_stats,
+    match_rhis_to_storms,
+    analyse_match_rhis_to_storms,
+    analyse_all_match_rhis_to_storms,
+])
