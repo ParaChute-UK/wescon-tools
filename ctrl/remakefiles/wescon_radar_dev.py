@@ -29,6 +29,10 @@ from loguru import logger
 from matplotlib import patches
 from scipy.signal import find_peaks
 
+# For Linear Mixed-Effects Models
+import statsmodels.formula.api as smf
+from scipy.stats import chi2
+
 from remake import Remake, Rule
 from simple_track.nimrod_user_functions import FileLoader
 from wescon_tools import proj_config as conf
@@ -1448,7 +1452,7 @@ class MatchRHIsToStorms(Rule):
     @staticmethod
     def rule_run(inputs, outputs, case, tracking_precip_thresh, dZ_stats_filters):
         # figdir = outputs['match_rhi_storm_stats'].parent
-        df_candidate_scans, df_dZ_stats, df_storms, ds_storms = MatchRHIsToStorms.load_data(case, inputs, tracking_precip_thresh)
+        df_candidate_scans, df_dZ_stats, df_storms, ds_storms, da_rain = MatchRHIsToStorms.load_data(case, inputs, tracking_precip_thresh)
         if dZ_stats_filters == 'all_cloud':
             pass
         elif dZ_stats_filters == 'high_cloud':
@@ -1482,7 +1486,11 @@ class MatchRHIsToStorms(Rule):
                 unique_storm_labels = np.unique(transect_labels.values)
                 unique_storm_labels = unique_storm_labels[unique_storm_labels != 0]
 
-                precip_along_beam = ds_storms.rain.sel(time=time, method='nearest').interp(eastings=transect_x, northings=transect_y, method='linear')
+                precip_along_beam = (
+                    da_rain
+                    .interp(time=time, method='linear')
+                    .interp(eastings=transect_x, northings=transect_y, method='linear')
+                )
                 mean_precip_along_beam = precip_along_beam.mean().values.item()
                 df_data.append({
                     'dZ_stats_idx': row.name,
@@ -1512,16 +1520,39 @@ class MatchRHIsToStorms(Rule):
         path = datadir / f'metoffice-c-band-rain-radar_uk_{case}.nc'
         # All this ensures I'm using the same subdomain as for the tracking.
         loader = FileLoader([path], chilbolton_centred=True)
-        da = loader.curr_da.load()
+        da_rain = loader.curr_da.load()
 
         dirpath = conf.PATHS['datadir'] / f'upflo_wp1_output/simple_track/{year}/{month:02d}/{day:02d}/'
         path = list(dirpath.glob(f'storm_labels_*.precip_thresh_{tracking_precip_thresh}.nc'))[0]
         ds_storms = xr.load_dataset(path)
-        ds_storms['rain'] = da
 
         path = list(dirpath.glob(f'storm_data_*.precip_thresh_{tracking_precip_thresh}.hdf'))[0]
         df_storms = pd.read_hdf(path, key='storm_data')
-        ds_storms['rain'] = da
+
+        def add_stage(df, value_col='area', id_col='storm_idx', time_col='time',
+                      frac=0.8, smooth=0):
+            df = df.sort_values([id_col, time_col]).copy()
+
+            def label(g):
+                a = g[value_col].to_numpy(dtype=float)
+                if smooth and len(a) >= smooth:
+                    a = pd.Series(a).rolling(smooth, center=True, min_periods=1).median().to_numpy()
+                n = len(a)
+                pk = int(np.argmax(a))
+                thr = frac * a[pk]
+                left, right = pk, pk
+                while left - 1 >= 0 and a[left - 1] >= thr:
+                    left -= 1
+                while right + 1 < n and a[right + 1] >= thr:
+                    right += 1
+                s = np.full(n, 'growth', dtype=object)
+                s[left:right + 1] = 'mature'
+                s[right + 1:] = 'decay'
+                return pd.Series(s, index=g.index)
+
+            df['stage'] = df.groupby(id_col, group_keys=False).apply(label)
+            return df
+        df_storms = add_stage(df_storms)
 
         try:
             df = pd.read_hdf(inputs['gathered_dZ_stats'], key='gathered_dZ_stats')
@@ -1533,7 +1564,7 @@ class MatchRHIsToStorms(Rule):
             df_dZ_stats = df
         else:
             df_dZ_stats = df[df.optimal_parallel_offset & df.aligned_perp_offset]
-        return df_candidate_scans, df_dZ_stats, df_storms, ds_storms
+        return df_candidate_scans, df_dZ_stats, df_storms, ds_storms, da_rain
 
     @staticmethod
     def load_rhis(df_candidate_scans, row, xmin, xmax):
@@ -1608,8 +1639,6 @@ def annotate_fit_with_line(x, y, **kws):
 class AnalyseMatchRHIsToStorms(Rule):
     rule_matrix = {
         'case': conf.CASES,
-        # 'tracking_precip_thresh': [1., 3., 5.],
-        # 'dZ_stats_filters': ['all_cloud', 'high_cloud']
     }
 
     @staticmethod
@@ -1634,11 +1663,10 @@ class AnalyseMatchRHIsToStorms(Rule):
 
     @staticmethod
     def rule_run(inputs, outputs, case):
-        logger.debug(case)
+        logger.info(case)
         analysis_stats = []
         for tracking_precip_thresh in [1., 3., 5.]:
-            df_candidate_scans, df_dZ_stats, df_storms, ds_storms = MatchRHIsToStorms.load_data(case, inputs,
-                                                                                                tracking_precip_thresh)
+            _, df_dZ_stats, df_storms, _, _ = MatchRHIsToStorms.load_data(case, inputs, tracking_precip_thresh)
             for dZ_stats_filters in ['all_cloud', 'high_cloud']:
                 key = f'{tracking_precip_thresh}_{dZ_stats_filters}'
                 logger.info(key)
@@ -1649,8 +1677,9 @@ class AnalyseMatchRHIsToStorms(Rule):
                                                                analysis_stats)
 
         df_analysis_matches_full = pd.DataFrame(analysis_stats)
+        df_analysis_matches_full['case'] = case
 
-        if df_analysis_matches_full.empty:
+        if len(df_analysis_matches_full) < 10 or df_analysis_matches_full.empty:
             logger.warning(f'No analysis matches found for {case} — skipping plots')
             pd.DataFrame().to_hdf(outputs['analyse_match_rhi_storm_stats'], key='analyse_match_rhi_storm_stats')
             outputs['fig_dummy'].touch()
@@ -1688,8 +1717,8 @@ class AnalyseMatchRHIsToStorms(Rule):
         figdir = outputs['fig_dummy'].parent
         # Skip settings, match_idx and dt.
         cols = df_analysis_matches.columns.tolist()[3:]
-        xcols = [c for c in cols if not c.startswith('deltaZ')]
-        ycols = [c for c in cols if c.startswith('deltaZ')]
+        xcols = [c for c in cols if c.startswith('deltaZ')]
+        ycols = [c for c in cols if not (c.startswith('deltaZ')) and c not in ['case', 'stage']]
 
         # If showing full set of correlations.
         # g = sns.pairplot(df_analysis_matches[cols], x_vars=xcols, y_vars=ycols, diag_kind='kde', corner=True)
@@ -1697,7 +1726,7 @@ class AnalyseMatchRHIsToStorms(Rule):
         # If only showing partial set.
         g = sns.pairplot(df_analysis_matches[cols], x_vars=xcols, y_vars=ycols, diag_kind='kde')
         g.map(annotate_fit_with_line)
-        g.figure.suptitle(f'{case} thresh={tracking_precip_thresh} {dZ_stats_filters}')
+        g.figure.suptitle(f'{case} thresh={tracking_precip_thresh} {dZ_stats_filters} N={len(df_analysis_matches)}')
         g.figure.subplots_adjust(top=0.96)
         figpath = figdir / f'analysis_match_rhi_storm_stats.corr.{case}.thresh_{tracking_precip_thresh}.{dZ_stats_filters}.png'
         logger.info(f'saving to {figpath}')
@@ -1738,6 +1767,7 @@ class AnalyseMatchRHIsToStorms(Rule):
                 'area': df_storms_either_side.iloc[0].area,
                 'extreme_precip': df_storms_either_side.iloc[0].extreme,
                 'mean_precip': df_storms_either_side.iloc[0].meanfield,
+                'stage': df_storms_either_side.iloc[0].stage,
                 'darea_dt': row_delta.area / dt,
                 'dextreme_precip_dt': row_delta.extreme / dt,
                 'dmean_precip_dt': row_delta.meanfield / dt,
@@ -1750,3 +1780,106 @@ class AnalyseMatchRHIsToStorms(Rule):
                 'deltaZ_absmean_20dBZ': row_stats.deltaZ_absmean_20dBZ,
                 'deltaZ_posmean_20dBZ': row_stats.deltaZ_posmean_20dBZ,
             })
+
+
+class AnalyseAllMatchRHIsToStorms(Rule):
+    rule_matrix = {}
+
+    @staticmethod
+    def rule_inputs():
+        inputs = {}
+        for case in conf.CASES:
+            case_outputs = AnalyseMatchRHIsToStorms.rule_outputs(case)
+            inputs[f'{case}_analyse_match_rhi_storm_stats'] = case_outputs['analyse_match_rhi_storm_stats']
+        return inputs
+
+    @staticmethod
+    def rule_outputs():
+        figdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / 'all' / 'camra' / 'deltaZ_candidate'
+        return {
+            'fig_dummy': (figdir / 'rhi_storm_match' / 'tracking_precip_thresh' / 'fig_dummy.out'),
+        }
+
+    @staticmethod
+    def rule_run(inputs, outputs):
+        dfs = []
+        for case in conf.CASES:
+            df_analysis_matches_full = pd.read_hdf(inputs[f'{case}_analyse_match_rhi_storm_stats'],
+                                                    key='analyse_match_rhi_storm_stats')
+            if df_analysis_matches_full.empty:
+                logger.warning(f'No analysis matches found for {case} — skipping')
+                continue
+            dfs.append(df_analysis_matches_full)
+
+        if not dfs:
+            logger.warning('No analysis matches found for any case — skipping plots')
+            outputs['fig_dummy'].touch()
+            return
+
+        df_analysis_matches_full = pd.concat(dfs, ignore_index=True)
+
+        # This code is from Gemini. See this conversation: https://gemini.google.com/app/2e11a09d16a660ea
+
+        # 1. Create a copy to safely add standardized columns
+        df = df_analysis_matches_full.copy()
+
+        # 2. Standardize both variables (z-score: (x - mean) / std)
+        df['precip_std'] = (df['delta_precip_along_beam'] - df['delta_precip_along_beam'].mean()) / df[
+            'delta_precip_along_beam'].std()
+        df['deltaZ_std'] = (df['deltaZ_mean'] - df['deltaZ_mean'].mean()) / df['deltaZ_mean'].std()
+
+        # 3. Fit Null Model (fixed slope, random intercept) using the standardized variables
+        m0 = smf.mixedlm(
+            "precip_std ~ deltaZ_std",
+            df,
+            groups=df["case"]
+        ).fit(reml=False)
+
+        # 4. Fit Alternative Model (random intercept AND random slope)
+        m1 = smf.mixedlm(
+            "precip_std ~ deltaZ_std",
+            df,
+            groups=df["case"],
+            re_formula="~deltaZ_std"
+        ).fit(reml=False)
+
+        # 5. Likelihood Ratio Test
+        lrt_stat = 2 * (m1.llf - m0.llf)
+        df_diff = m1.df_modelwc - m0.df_modelwc
+        p_val = chi2.sf(lrt_stat, df=df_diff)
+
+        print(f"LRT Statistic: {lrt_stat:.2f}")
+        print(f"p-value for heterogeneity: {p_val:.2e}")
+        print("\n--- Alternative Model Summary (Standardized) ---")
+        print(m1.summary())
+
+        for tracking_precip_thresh, dZ_stats_filters in product([1., 3., 5.], ['all_cloud', 'high_cloud']):
+            key = f'{tracking_precip_thresh}_{dZ_stats_filters}'
+            df_analysis_matches = df_analysis_matches_full[df_analysis_matches_full.settings == key]
+
+            AnalyseMatchRHIsToStorms.plot_full_corr_matrix('all', tracking_precip_thresh, dZ_stats_filters,
+                                                           df_analysis_matches, outputs)
+
+            for stage in ['growth', 'mature', 'decay']:
+                df_analysis_matches_stage = df_analysis_matches[df_analysis_matches.stage == stage]
+
+                AnalyseMatchRHIsToStorms.plot_full_corr_matrix(f'all_{stage}', tracking_precip_thresh, dZ_stats_filters,
+                                                               df_analysis_matches_stage, outputs)
+
+        fig, axes = plt.subplots(1, 6, figsize=(20, 4), layout='constrained')
+        for ax, (tracking_precip_thresh, dZ_stats_filters) in zip(axes, product([1., 3., 5.], ['all_cloud', 'high_cloud'])):
+            key = f'{tracking_precip_thresh}_{dZ_stats_filters}'
+            df_analysis_matches = df_analysis_matches_full[df_analysis_matches_full.settings == key]
+            ax.scatter(df_analysis_matches.area, df_analysis_matches.deltaZ_mean_20dBZ)
+            annotate_fit_with_line(df_analysis_matches.area, df_analysis_matches.deltaZ_mean_20dBZ, ax=ax)
+
+            ax.set_title(f'{dZ_stats_filters} thresh={tracking_precip_thresh}')
+            ax.set_xlabel('area')
+            if ax == axes[0]:
+                ax.set_ylabel('deltaZ_mean_20dBZ')
+
+        figdir = outputs['fig_dummy'].parent
+        figpath = figdir / 'analysis_match_rhi_storm_stats.corr.area.deltaZ_mean_20dBZ.png'
+        outputs['fig_dummy'].touch()
+        logger.info(f'saving to {figpath}')
+        plt.savefig(figpath)
