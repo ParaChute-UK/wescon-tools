@@ -97,3 +97,54 @@ pipeline chains end-to-end on remake3-produced data:
 | `wescon_radar_dev.py:375` (regridded nc) | `outdir/wescon_radar_dev/{case}/` | `outdir/wescon_radar_dev/{output_vn}/{case}/` |
 - New `import statsmodels.formula.api as smf` and `from scipy.stats import chi2`
   in `wescon_radar_dev.py` (used by added analysis code).
+
+## Pipeline build verified end-to-end (2026-06-18)
+
+`remake info wescon_radar_dev.py` (run from `ctrl/remakefiles/`, where
+`.remake/` lives) now reports a fully-built pipeline — all tasks success, none
+failed, pending, or to-run:
+
+| rule | tasks | success |
+| ---- | ----- | ------- |
+| `regrid_camra_kepler_l1`           | 774  | 774 |
+| `plot_regridded_camra_kepler_l1`   | 774  | 774 |
+| `find_candidate_delta_z`           | 18   | 18  |
+| `compare_delta_z_candidates`       | 1465 | 1465 |
+| `gather_delta_z_stats`             | 18   | 18  |
+| `match_rhis_to_storms`             | 108  | 108 |
+| `analyse_match_rhis_to_storms`     | 18   | 18  |
+| `analyse_all_match_rhis_to_storms` | 1    | 1   |
+| **TOTAL**                          | 3176 | 3176 |
+
+This is the migration acceptance test passing: the gather → match → analyse
+chain that was previously *deferred* behind `compare_delta_z_candidates` (via
+the `@deferrable` matrices, below) has now run to completion, the 5 re-stamped
+`compare_delta_z_candidates` tasks held, and there are no spurious reruns from
+the old logger-in-`uses` issue.
+
+> **Run from the right directory.** remake resolves `.remake/` relative to the
+> cwd. Running `remake info` from the repo root finds no database and silently
+> *creates a fresh empty one* there (showing every task as pending) — run from
+> `ctrl/remakefiles/`.
+
+## Dynamic matrices: `@deferrable` / `Defer` (final form)
+
+`compare_delta_z_matrix` and `gather_delta_z_stats_matrix` are *callable*
+matrices that read upstream `brackets` files written by `find_candidate_delta_z`.
+They are marked `@deferrable` and `raise Defer(brackets_path)` while those files
+are absent. The planner then defers the rule (and everything downstream) and
+retries after each wave — locally via the replanning loop, on SLURM via a
+`remake_continue` continuation job chained with `afterok`.
+
+`@deferrable` does two things here:
+1. makes raising `Defer` legal (raising it from an unmarked matrix is an error); and
+2. also defers the rule while its upstream is *rerunning in the same
+   invocation*, so the matrix never expands from an about-to-be-overwritten
+   (stale) brackets file. This matters on SLURM, which plans once up front and
+   would otherwise expand from stale rows; the local replanning loop self-heals
+   either way.
+
+This replaced an earlier stopgap (silent empty matrix guarded by `.exists()`,
+which forced manual reruns and had the staleness gap). See the module docstring
+in `wescon_radar_dev.py` and the remake3 skill's
+`remake2_to_remake3.md` → "Dynamic/callable matrices" section.
