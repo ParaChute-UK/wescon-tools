@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 import pytest
-from wescon_radar_dev import CompareDeltaZCandidates
+from delta_z import create_composites
 from helpers import make_gaussian_z_field
 
 CHIL_X = 439285
@@ -51,7 +51,7 @@ class TestCreateComposites:
 
     def test_full_bracket_composite_is_mean_of_all_4(self):
         ds = make_4scan_bracket(amplitude_step=5.0)
-        ds_comp, _ = CompareDeltaZCandidates.create_composites(ds, ds, [0, 1, 2, 3], [0, 1, 2, 3])
+        ds_comp, _ = create_composites(ds, ds, [0, 1, 2, 3], [0, 1, 2, 3])
         # Amplitudes 40, 45, 50, 55 → mean peak ≈ 47.5
         peak = float(ds_comp.rhi_Z.max())
         assert abs(peak - 47.5) < 1.0
@@ -59,17 +59,17 @@ class TestCreateComposites:
     def test_subset_beam_idxs_changes_composite(self):
         ds = make_4scan_bracket(amplitude_step=5.0)
         # Beams [0, 1] only → mean of 40 and 45 → peak ≈ 42.5
-        ds_comp, _ = CompareDeltaZCandidates.create_composites(ds, ds, [0, 1], [0, 1])
+        ds_comp, _ = create_composites(ds, ds, [0, 1], [0, 1])
         peak = float(ds_comp.rhi_Z.max())
         assert abs(peak - 42.5) < 1.0
 
     def test_composite_time_is_mean_of_selected_beams(self):
         ds = make_4scan_bracket()
-        ds_comp, _ = CompareDeltaZCandidates.create_composites(ds, ds, [0, 1], [0, 1])
+        ds_comp, _ = create_composites(ds, ds, [0, 1], [0, 1])
         expected_time = ds.time.isel(time=[0, 1]).mean()
         assert ds_comp.time.values == expected_time.values
 
     def test_composite_drops_time_dimension(self):
         ds = make_4scan_bracket()
-        ds_comp, _ = CompareDeltaZCandidates.create_composites(ds, ds, [0, 1, 2, 3], [0, 1, 2, 3])
+        ds_comp, _ = create_composites(ds, ds, [0, 1, 2, 3], [0, 1, 2, 3])
         assert 'time' not in ds_comp.rhi_Z.dims

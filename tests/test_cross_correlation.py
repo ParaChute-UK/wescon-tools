@@ -1,7 +1,7 @@
 import numpy as np
 import xarray as xr
 import pytest
-from wescon_radar_dev import CompareDeltaZCandidates
+from delta_z import calc_cross_correlation
 from helpers import make_gaussian_z_field
 
 
@@ -15,7 +15,7 @@ class TestCalcCrossCorrelation:
 
     def test_identical_fields_peak_at_zero(self):
         da = make_gaussian_z_field()
-        result = CompareDeltaZCandidates.calc_cross_correlation(da, da)
+        result = calc_cross_correlation(da, da)
         assert 0 in result.valid_parallel_offsets
 
     @pytest.mark.parametrize('shift', [5, 10, -5, -10])
@@ -31,7 +31,7 @@ class TestCalcCrossCorrelation:
         """
         da1 = make_gaussian_z_field(center_x=75.0)
         da2 = roll_field(da1, shift)
-        result = CompareDeltaZCandidates.calc_cross_correlation(da1, da2)
+        result = calc_cross_correlation(da1, da2)
         assert -shift in result.valid_parallel_offsets, (
             f'Expected correction offset={-shift} in valid offsets {result.valid_parallel_offsets} '
             f'(da2 was rolled by shift={shift}). '
@@ -39,16 +39,16 @@ class TestCalcCrossCorrelation:
         )
 
     def test_valid_offsets_within_threshold(self):
-        from wescon_radar_dev import compare_settings
+        from delta_z import compare_settings
         da = make_gaussian_z_field()
-        result = CompareDeltaZCandidates.calc_cross_correlation(da, da)
+        result = calc_cross_correlation(da, da)
         thresh = compare_settings.corr_offset_thresh
         for off in result.valid_parallel_offsets:
             assert abs(off) <= thresh
 
     def test_valid_offsets_above_p95(self):
         da = make_gaussian_z_field()
-        result = CompareDeltaZCandidates.calc_cross_correlation(da, da)
+        result = calc_cross_correlation(da, da)
         for off in result.valid_parallel_offsets:
             cc_val = result.ccplot[off + result.half]
             assert cc_val >= result.percentiles['p95']
@@ -58,5 +58,5 @@ class TestCalcCrossCorrelation:
         rng = np.random.default_rng(42)
         da1 = xr.DataArray(rng.normal(0, 1, (50, 200)), dims=['z', 'x'])
         da2 = xr.DataArray(rng.normal(0, 1, (50, 200)), dims=['z', 'x'])
-        result = CompareDeltaZCandidates.calc_cross_correlation(da1, da2)
+        result = calc_cross_correlation(da1, da2)
         assert isinstance(result.valid_parallel_offsets, np.ndarray)

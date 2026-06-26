@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from wescon_radar_dev import sliding_offset_to_slices, find_sliding_min_rmse
+from delta_z import sliding_offset_to_slices, find_sliding_min_rmse
 
 
 class TestSlidingOffsetToSlices:

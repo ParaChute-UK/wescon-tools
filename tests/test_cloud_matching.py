@@ -1,7 +1,7 @@
 import numpy as np
 import xarray as xr
 import pytest
-from wescon_radar_dev import CompareDeltaZCandidates
+from delta_z import find_overlapping_cloud_matches
 
 
 def make_label_arrays():
@@ -48,7 +48,7 @@ class TestFindOverlappingCloudMatches:
         labels1, labels2 = make_label_arrays()
         objs1 = make_minimal_obj_dataset([1])
         objs2 = make_minimal_obj_dataset([1, 2])
-        matches = CompareDeltaZCandidates.find_overlapping_cloud_matches(
+        matches = find_overlapping_cloud_matches(
             labels1, labels2, objs1, objs2
         )
         assert (1, 1) in matches
@@ -57,7 +57,7 @@ class TestFindOverlappingCloudMatches:
         labels1, labels2 = make_label_arrays()
         objs1 = make_minimal_obj_dataset([1])
         objs2 = make_minimal_obj_dataset([1, 2])
-        matches = CompareDeltaZCandidates.find_overlapping_cloud_matches(
+        matches = find_overlapping_cloud_matches(
             labels1, labels2, objs1, objs2
         )
         assert (1, 2) not in matches
@@ -69,7 +69,7 @@ class TestFindOverlappingCloudMatches:
         labels2[:, 15:] = 1   # right side, no overlap
         objs1 = make_minimal_obj_dataset([1])
         objs2 = make_minimal_obj_dataset([1])
-        matches = CompareDeltaZCandidates.find_overlapping_cloud_matches(
+        matches = find_overlapping_cloud_matches(
             labels1, labels2, objs1, objs2
         )
         assert matches == []

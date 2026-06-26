@@ -2,7 +2,8 @@ import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
-from wescon_radar_dev import CompareDeltaZCandidates, compare_settings
+from delta_z import (calc_parallel_perpendicular_winds,
+                     calc_cross_correlation, compare_settings)
 from helpers import make_uniform_flow_ds, make_gaussian_z_field
 
 WIND_SPEED = 10.0   # m/s
@@ -18,7 +19,7 @@ def wind_components(az_deg, u_ms, v_ms):
     ds2 = make_uniform_flow_ds(az_deg=az_deg, u_ms=u_ms, v_ms=v_ms, t=t2)
     nx = len(ds1.x)
     x_idxmin, x_idxmax = nx // 4, 3 * nx // 4
-    _, par, perp, _, _ = CompareDeltaZCandidates.calc_parallel_perpendicular_winds(
+    _, par, perp, _, _ = calc_parallel_perpendicular_winds(
         ds1, ds2, x_idxmin, x_idxmax
     )
     return par, perp
@@ -94,7 +95,7 @@ class TestWindParallelOffset:
         ds2 = make_uniform_flow_ds(az_deg=0.0, u_ms=0.0, v_ms=WIND_SPEED_AWAY, t=t2)
         nx = len(ds1.x)
         x_idxmin, x_idxmax = nx // 4, 3 * nx // 4
-        est_offset, par, _, _, _ = CompareDeltaZCandidates.calc_parallel_perpendicular_winds(
+        est_offset, par, _, _, _ = calc_parallel_perpendicular_winds(
             ds1, ds2, x_idxmin, x_idxmax
         )
         assert par > 0, 'Northward wind on north beam should be positive parallel'
@@ -153,7 +154,7 @@ class TestEndToEndSignChain:
         ds1_comp, ds2_comp = self._make_composites()
         x_idxmin, x_idxmax = self.NX // 4, 3 * self.NX // 4
 
-        est_offset, par, _, _, _ = CompareDeltaZCandidates.calc_parallel_perpendicular_winds(
+        est_offset, par, _, _, _ = calc_parallel_perpendicular_winds(
             ds1_comp, ds2_comp, x_idxmin, x_idxmax
         )
 
@@ -171,10 +172,10 @@ class TestEndToEndSignChain:
         ds1_comp, ds2_comp = self._make_composites()
         x_idxmin, x_idxmax = self.NX // 4, 3 * self.NX // 4
 
-        est_offset, _, _, _, _ = CompareDeltaZCandidates.calc_parallel_perpendicular_winds(
+        est_offset, _, _, _, _ = calc_parallel_perpendicular_winds(
             ds1_comp, ds2_comp, x_idxmin, x_idxmax
         )
-        cc_result = CompareDeltaZCandidates.calc_cross_correlation(
+        cc_result = calc_cross_correlation(
             ds1_comp.rhi_Z, ds2_comp.rhi_Z
         )
 
@@ -199,7 +200,7 @@ class TestEndToEndSignChain:
         ds1_comp, ds2_comp = self._make_composites()
         x_idxmin, x_idxmax = self.NX // 4, 3 * self.NX // 4
 
-        est_offset, _, _, _, _ = CompareDeltaZCandidates.calc_parallel_perpendicular_winds(
+        est_offset, _, _, _, _ = calc_parallel_perpendicular_winds(
             ds1_comp, ds2_comp, x_idxmin, x_idxmax
         )
 

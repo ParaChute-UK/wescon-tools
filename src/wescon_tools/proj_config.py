@@ -1,6 +1,15 @@
 from pathlib import Path
 
 KASBEX_OUTPUT_VN = 'v0.1'
+# Output version for the wescon_radar_dev pipeline (used in all its output paths).
+WESCON_RADAR_DEV_OUTPUT_VN = 'v13'
+
+# Radar geometry / timing constants (shared across wescon_radar_dev rules and the
+# delta_z module). Chilbolton (CAMRa) OSGB eastings/northings (m) and the RadarNet
+# rainfall product timestep (s).
+CHIL_X = 439285
+CHIL_Y = 138620
+RADARNET_TIMESTEP_S = 300
 
 PATHS = {
     'datadir': Path('/gws/ssde/j25b/afesp/users/mmuetz/upflo/data'),
