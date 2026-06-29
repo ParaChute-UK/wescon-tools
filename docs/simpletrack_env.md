@@ -8,7 +8,7 @@ envs:
 | variant   | import name    | class          | branch / checkout                                   | output dir              |
 |-----------|----------------|----------------|-----------------------------------------------------|-------------------------|
 | `current` | `simple_track` | `StormTracker` | `mm_classes_and_pip_installable` @ `~/projects/simple-track`        | `…/simple_track/`         |
-| `release` | `simpletrack`  | `Tracker`      | `master` @ `~/projects/simple-track-master` (worktree) | `…/simple_track_release/` |
+| `release` | `simpletrack`  | `Tracker`      | `parachute/master` @ `~/projects/simple-track-master` (worktree) | `…/simple_track_release/` |
 
 ## Rebuild it
 
@@ -24,16 +24,34 @@ sibling checkouts live elsewhere.
 ## Expected checkout layout
 
 The script assumes two checkouts of the simple-track repo, the second a git
-worktree of the first:
+worktree of the first. The release tracker tracks **`parachute/master`** (the
+ParaChute-UK remote), *not* the local `master` branch — on some machines the
+local `master` is a stale, pre-`simpletrack` checkout:
 
 ```bash
-# one-time, if not already present:
-git -C ~/projects/simple-track worktree add ../simple-track-master master
+# one-time, if not already present. Create the worktree on a local branch
+# tracking the parachute remote's master:
+git -C ~/projects/simple-track worktree add -b master-rel ../simple-track-master parachute/master
 ```
 
 - `~/projects/simple-track`        — branch `mm_classes_and_pip_installable` (import `simple_track`)
-- `~/projects/simple-track-master` — branch `master` (import `simpletrack`)
+- `~/projects/simple-track-master` — `parachute/master` via local `master-rel` (import `simpletrack`)
 - `~/projects/remake3`             — remake (installed editable)
+
+### Apply the release fixes
+
+The empty-first-frame crash fix and the `bincount` overlap-histogram perf fix
+(see the docs linked below) live on the branch
+**`fix/tracker-empty-first-frame-and-overlap-perf`** on the parachute remote. It
+fast-forwards from `parachute/master`, so just pull it into the worktree:
+
+```bash
+cd ~/projects/simple-track-master
+git fetch parachute fix/tracker-empty-first-frame-and-overlap-perf
+git merge --ff-only parachute/fix/tracker-empty-first-frame-and-overlap-perf
+```
+
+`simpletrack` is installed editable, so the fixes take effect with no reinstall.
 
 ## Why a `.pth` file instead of two pip installs
 
@@ -78,6 +96,10 @@ wescon-tools dependencies.
 ## Related docs
 
 - `docs/simple_track_migration_plan.md` — the migration plan and output contract.
-- `docs/simpletrack_overlap_histogram_bottleneck.md` — the `bincount` perf fix
-  applied in the master worktree (preserved across `--recreate`, since master is
-  installed editable from that source tree).
+- `docs/simpletrack_overlap_histogram_bottleneck.md` — the `bincount` perf fix,
+  now committed on `parachute/fix/tracker-empty-first-frame-and-overlap-perf`
+  (see "Apply the release fixes" above). Because it lives on a branch in the
+  worktree, it survives `--recreate` (master is installed editable from that
+  source tree).
+- `docs/simpletrack_empty_first_frame_bug.md` — the all-quiet-first-frame crash
+  fix, on the same branch.
