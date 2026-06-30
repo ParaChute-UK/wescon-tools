@@ -23,6 +23,7 @@ brackets. No manual "run it twice" is needed.
 
 Contact: mark.muetzelfeldt@reading.ac.uk
 """
+from collections import namedtuple
 from dataclasses import dataclass
 from itertools import batched, product
 from pathlib import Path
@@ -86,6 +87,12 @@ FIELD_NAME_MAP = {'camra': {'Z': 'DBZ_H', 'VEL': 'VEL_HV', }, 'kepler': {'Z': 'D
 #   'release' -> simple_track_release  (simpletrack master adapter)
 SIMPLE_TRACK_VARIANTS = ['current', 'release']
 VARIANT_SUBDIR = {'current': 'simple_track', 'release': 'simple_track_release'}
+
+# Analysis sweep axes. Used both as matrix dimensions (match_rhis_to_storms) and as
+# loop ranges in the downstream analyse_* rules -- keep them here so the matrix and
+# the loops that re-slice its outputs can never drift apart.
+TRACKING_PRECIP_THRESHS = [1., 3., 5.]
+DZ_STATS_FILTERS = ['all_cloud', 'high_cloud']
 
 
 @dataclass
@@ -166,9 +173,7 @@ def regrid_inputs(case, radar, batch_idx):
     paths = cpmap(case, radar)[batch_idx]
     return {
         **{'radar_paths': paths},
-        **{'radarnet': (
-                conf.PATHS['datadir'] / 'remake3' /
-                f'radarnet/{case[:4]}/{case[4:6]}/{case[6:8]}/metoffice-c-band-rain-radar_uk_{case}.nc')},
+        **{'radarnet': conf.radarnet_path(case)},
     }
 
 
@@ -355,13 +360,11 @@ def plot_radarnet(ds, ax=None, radar='camra'):
     da = ds.radarnet_flow_interped_rain
     az_mean = ds.rhi_mean_az.values.mean()
     t = pd.Timestamp(da.time.mean().values)
-    # from kirsty Hanley
-    levels = [0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64]
-    colors = ((0, 0, 0.6), 'b', 'c', 'g', 'y', (1, 0.5, 0), 'r', 'm', (0.6, 0.6, 0.6))
     ax.set_title(t)
     ax.coastlines('10m')
 
-    ax.contourf(da.eastings, da.northings, da, levels=levels, colors=colors, transform=data_crs)
+    ax.contourf(da.eastings, da.northings, da, levels=conf.RADARNET_LEVELS, colors=conf.RADARNET_COLORS,
+                transform=data_crs)
     ax.set_extent([CHIL_X - 155e3, CHIL_X + 155e3, CHIL_Y - 155e3, CHIL_Y + 155e3], crs=data_crs)
 
     if radar == 'camra':
@@ -514,10 +517,9 @@ def plot_camra_kepler_match(inputs, outputs, case):
             ax2 = fig.add_subplot(gs[2], sharex=ax1, sharey=ax1)
 
             ax0.coastlines()
-            levels = [0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64]
-            colors = ((0, 0, 0.6), 'b', 'c', 'g', 'y', (1, 0.5, 0), 'r', 'm', (0.6, 0.6, 0.6))
             da = ds_cam.radarnet_flow_interped_rain.sel(time=ri.time1)
-            ax0.contourf(da.eastings, da.northings, da, levels=levels, colors=colors, transform=ccrs.OSGB())
+            ax0.contourf(da.eastings, da.northings, da, levels=conf.RADARNET_LEVELS, colors=conf.RADARNET_COLORS,
+                         transform=ccrs.OSGB())
 
             az_mean = ds_cam.sel(time=ri.time1).rhi_mean_az.values.item()
             xs = CHIL_X + np.linspace(0, 150e3, 16) * np.sin(az_mean * np.pi / 180)
@@ -667,8 +669,7 @@ def gather_delta_z_stats_inputs(case):
 
 
 def gather_delta_z_stats_outputs(case):
-    outdir = conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
-    return {'gathered_dZ_stats': outdir / 'comparison' / 'gathered_dZ_stats.hdf'}
+    return {'gathered_dZ_stats': conf.deltaZ_outdir(case) / 'comparison' / 'gathered_dZ_stats.hdf'}
 
 
 @rule(
@@ -691,14 +692,12 @@ def gather_delta_z_stats(inputs, outputs, case):
 def load_data(case, inputs, tracking_precip_thresh, simple_track_variant):
     df_candidate_scans = pd.read_hdf(inputs['candidate_scans'])
 
-    year, month, day = int(case[:4]), int(case[4:6]), int(case[6:])
-    datadir = conf.PATHS['datadir'] / 'remake3' / f'radarnet/{year}/{month:02d}/{day:02d}'
-    path = datadir / f'metoffice-c-band-rain-radar_uk_{case}.nc'
     # All this ensures I'm using the same subdomain as for the tracking.
-    loader = FileLoader([path], chilbolton_centred=True)
+    loader = FileLoader([inputs['radarnet']], chilbolton_centred=True)
     da_rain = loader.curr_da.load()
 
     # Select the storm-tracking producer variant ('current' vs 'release' tracker).
+    year, month, day = int(case[:4]), int(case[4:6]), int(case[6:])
     subdir = VARIANT_SUBDIR[simple_track_variant]
     dirpath = conf.PATHS['outdir'] / f'{subdir}/{year}/{month:02d}/{day:02d}/'
     path = list(dirpath.glob(f'storm_labels_*.precip_thresh_{tracking_precip_thresh}.nc'))[0]
@@ -744,31 +743,160 @@ def load_data(case, inputs, tracking_precip_thresh, simple_track_variant):
         df_dZ_stats = df[df.optimal_parallel_offset & df.aligned_perp_offset]
     return df_candidate_scans, df_dZ_stats, df_storms, ds_storms, da_rain
 
-
 def match_rhis_to_storms_inputs(case, tracking_precip_thresh, dZ_stats_filters, simple_track_variant):
     inputs = find_candidate_delta_z_outputs(case)
     inputs.update(gather_delta_z_stats_outputs(case))
+    inputs['radarnet'] = conf.radarnet_path(case)
     return inputs
 
 
 def match_rhis_to_storms_outputs(case, tracking_precip_thresh, dZ_stats_filters, simple_track_variant):
-    outdir = conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
+    outdir = conf.deltaZ_outdir(case)
     return {'match_rhi_storm_stats': (outdir / 'rhi_storm_match' /
                                       f'simple_track_{simple_track_variant}' /
                                       f'tracking_precip_thresh_{tracking_precip_thresh}' /
                                       f'match_rhi_storm_stats.{dZ_stats_filters}.hdf')}
 
 
+def calc_marshall_palmer(ds_subs, method='marshall1955', height=1):
+    ab_map = {
+        'marshall1955': (200, 1.6),
+        'marshallpalmer1948': (237, 1.5),
+        'WSR-88D': (300, 1.4),
+    }
+    a, b = ab_map[method]
+    rainfall = {}
+    for i in [1, 2]:
+        ds_sub = ds_subs[i]
+        dBZ = ds_sub.sel(z=height).rhi_Z.values
+        Z = 10**(dBZ / 10)
+        R = (Z / a)**b
+        rainfall[i] = R
+    return rainfall
+
+
+def load_rhis(df_candidate_scans, row, xmin, xmax):
+    """Open the two bracketed composite RHIs for a dZ-stats row, perp-offset aligned and x-subset.
+
+    Shared by compare_rhis_to_radarnet and match_rhis_to_storms; both declare it in uses=.
+    """
+    b1paths = df_candidate_scans[df_candidate_scans.bracket == row.bracket_idx1]['path'].values
+    b2paths = df_candidate_scans[df_candidate_scans.bracket == row.bracket_idx2]['path'].values
+    s1, s2 = sliding_offset_to_slices(row.perp_offset)
+    return {
+        1: xr.open_mfdataset(b1paths[s1]).sel(x=slice(xmin, xmax)).mean(dim='time'),
+        2: xr.open_mfdataset(b2paths[s2]).sel(x=slice(xmin, xmax)).mean(dim='time'),
+    }
+
+
+BeamScan = namedtuple('BeamScan', 'row scan_idx time az_mean ds_subs transect_x transect_y mean_precip_along_beam')
+
+
+def iter_beam_scans(df_dZ_stats, df_candidate_scans, da_rain):
+    """Iterate the (dZ-candidate row, scan_idx in {1, 2}) grid shared by compare_rhis_to_radarnet
+    and match_rhis_to_storms.
+
+    For each scan yields a BeamScan with the bracket RHIs (ds_subs), the beam transect
+    (eastings/northings projected from the scan azimuth) and the along-beam mean RadarNet precip.
+    Each consumer appends its own per-scan fields (Marshall-Palmer rainfall / storm-label matches).
+    Shared by both rules; both declare it in uses= (along with load_rhis, which it calls).
+    """
+    for i in range(len(df_dZ_stats)):
+        row = df_dZ_stats.iloc[i]
+        transect_dist = np.arange(row.xmin, row.xmax) * 1e3  # km to m.
+        ds_subs = load_rhis(df_candidate_scans, row, row.xmin, row.xmax)
+        for scan_idx in [1, 2]:
+            time = row[f'time{scan_idx}']
+            az_mean = row[f'az_mean{scan_idx}']
+            transect_x = xr.DataArray(transect_dist * np.sin(az_mean * np.pi / 180) + CHIL_X, dims='transect')
+            transect_y = xr.DataArray(transect_dist * np.cos(az_mean * np.pi / 180) + CHIL_Y, dims='transect')
+            precip_along_beam = (
+                da_rain
+                .interp(time=time, method='linear')
+                .interp(eastings=transect_x, northings=transect_y, method='linear')
+            )
+            yield BeamScan(row, scan_idx, time, az_mean, ds_subs, transect_x, transect_y,
+                           precip_along_beam.mean().values.item())
+
+
+def compare_rhis_to_radarnet_inputs(case):
+    inputs = find_candidate_delta_z_outputs(case)
+    inputs.update(gather_delta_z_stats_outputs(case))
+    inputs['radarnet'] = conf.radarnet_path(case)
+    return inputs
+
+
+def compare_rhis_to_radarnet_outputs(case):
+    return {'compare_rhis_to_radarnet': conf.deltaZ_outdir(case) / 'compare_rhis_to_radarnet.hdf'}
+
+
+@rule(
+    inputs=compare_rhis_to_radarnet_inputs,
+    outputs=compare_rhis_to_radarnet_outputs,
+    matrix={'case': conf.CASES},
+    # 'dZ_stats_filters': ['all_cloud', 'high_cloud'],
+    depends_on=[gather_delta_z_stats],
+    uses={
+        'CHIL_X': CHIL_X,
+        'CHIL_Y': CHIL_Y,
+        'FileLoader': FileLoader,
+        'iter_beam_scans': iter_beam_scans,
+        'BeamScan': BeamScan,
+        'load_rhis': load_rhis,
+        'sliding_offset_to_slices': sliding_offset_to_slices,
+        'calc_marshall_palmer': calc_marshall_palmer,
+    }
+)
+def compare_rhis_to_radarnet(inputs, outputs, case):
+    from loguru import logger
+
+    df_candidate_scans = pd.read_hdf(inputs['candidate_scans'])
+
+    try:
+        df = pd.read_hdf(inputs['gathered_dZ_stats'], key='gathered_dZ_stats')
+    except FileNotFoundError:
+        logger.error('Cannot find gathered stats: you probably need to do a full rerun to generate this')
+        raise
+    # Only keep optimal along beam and aligned across beam.
+    if df.empty:
+        df_dZ_stats = df
+    else:
+        df_dZ_stats = df[df.optimal_parallel_offset & df.aligned_perp_offset]
+
+    # All this ensures I'm using the same subdomain as for the tracking.
+    loader = FileLoader([inputs['radarnet']], chilbolton_centred=True)
+    da_rain = loader.curr_da.load()
+
+    df_data = []
+    # fields available can be seen in stats_entry
+    for bs in iter_beam_scans(df_dZ_stats, df_candidate_scans, da_rain):
+        rainfall = calc_marshall_palmer(bs.ds_subs, method='WSR-88D')
+        df_data.append({
+            'dZ_stats_idx': bs.row.name,
+            'scan_idx': bs.scan_idx,
+            'rhi_time': bs.time,
+            'mean_precip_along_beam': bs.mean_precip_along_beam,
+            'mp_rain': rainfall[bs.scan_idx].mean(),
+        })
+
+    df_rhi_rain_stats = pd.DataFrame(df_data)
+    logger.debug(df_rhi_rain_stats)
+    df_rhi_rain_stats.to_hdf(Path(outputs['compare_rhis_to_radarnet']), key='compare_rhis_to_radarnet')
+
+
 @rule(
     inputs=match_rhis_to_storms_inputs,
     outputs=match_rhis_to_storms_outputs,
-    matrix={'case': conf.CASES, 'tracking_precip_thresh': [1., 3., 5.], 'dZ_stats_filters': ['all_cloud', 'high_cloud'],
+    matrix={'case': conf.CASES, 'tracking_precip_thresh': TRACKING_PRECIP_THRESHS, 'dZ_stats_filters': DZ_STATS_FILTERS,
             'simple_track_variant': SIMPLE_TRACK_VARIANTS},
     depends_on=[gather_delta_z_stats],
     uses={
         'CHIL_X': CHIL_X,
         'CHIL_Y': CHIL_Y,
         'load_data': load_data,
+        'iter_beam_scans': iter_beam_scans,
+        'BeamScan': BeamScan,
+        'load_rhis': load_rhis,
         'sliding_offset_to_slices': sliding_offset_to_slices,    },
 )
 def match_rhis_to_storms(inputs, outputs, case, tracking_precip_thresh, dZ_stats_filters, simple_track_variant):
@@ -780,17 +908,6 @@ def match_rhis_to_storms(inputs, outputs, case, tracking_precip_thresh, dZ_stats
         assert len(storm_row) == 1
         return int(storm_row.iloc[0].storm_idx)
 
-    def load_rhis(df_candidate_scans, row, xmin, xmax):
-        b1paths = df_candidate_scans[df_candidate_scans.bracket == row.bracket_idx1]['path'].values
-        b2paths = df_candidate_scans[df_candidate_scans.bracket == row.bracket_idx2]['path'].values
-        perp_offset = row.perp_offset
-        s1, s2 = sliding_offset_to_slices(perp_offset)
-        ds_sub = {
-            1: xr.open_mfdataset(b1paths[s1]).sel(x=slice(xmin, xmax)).mean(dim='time'),
-            2: xr.open_mfdataset(b2paths[s2]).sel(x=slice(xmin, xmax)).mean(dim='time'),
-        }
-        return ds_sub
-
     df_candidate_scans, df_dZ_stats, df_storms, ds_storms, da_rain = load_data(
         case, inputs, tracking_precip_thresh, simple_track_variant)
     if dZ_stats_filters == 'all_cloud':
@@ -800,49 +917,28 @@ def match_rhis_to_storms(inputs, outputs, case, tracking_precip_thresh, dZ_stats
             df_dZ_stats = df_dZ_stats[df_dZ_stats.o1_cloud_max_z > 4]
 
     df_data = []
+    # fields available can be seen in stats_entry
+    for bs in iter_beam_scans(df_dZ_stats, df_candidate_scans, da_rain):
+        storm_labels = ds_storms.storm_labels.sel(time=bs.time, method='nearest')
+        storm_time = pd.Timestamp(storm_labels.time.values.item())
 
-    for i in range(len(df_dZ_stats)):
-        # fields available can be seen in stats_entry
-        row = df_dZ_stats.iloc[i]
-        xmin = row.xmin
-        xmax = row.xmax
+        # Find the labels by doing nearest neighbour interp along transect.
+        transect_labels = storm_labels.interp(eastings=bs.transect_x, northings=bs.transect_y, method='nearest')
+        unique_storm_labels = np.unique(transect_labels.values)
+        unique_storm_labels = unique_storm_labels[unique_storm_labels != 0]
 
-        ds_sub = load_rhis(df_candidate_scans, row, xmin, xmax)
-        transect_dist = np.arange(xmin, xmax) * 1e3  # km to m.
-
-        for scan_idx in [1, 2]:
-            time = row[f'time{scan_idx}']
-            storm_labels = ds_storms.storm_labels.sel(time=time, method='nearest')
-            storm_time = pd.Timestamp(storm_labels.time.values.item())
-
-            az_mean = row[f'az_mean{scan_idx}']
-
-            # Find the labels by doing nearest neighbour interp along transect.
-            transect_x = xr.DataArray(transect_dist * np.sin(az_mean * np.pi / 180) + CHIL_X, dims='transect')
-            transect_y = xr.DataArray(transect_dist * np.cos(az_mean * np.pi / 180) + CHIL_Y, dims='transect')
-            transect_labels = storm_labels.interp(eastings=transect_x, northings=transect_y, method='nearest')
-
-            unique_storm_labels = np.unique(transect_labels.values)
-            unique_storm_labels = unique_storm_labels[unique_storm_labels != 0]
-
-            precip_along_beam = (
-                da_rain
-                .interp(time=time, method='linear')
-                .interp(eastings=transect_x, northings=transect_y, method='linear')
-            )
-            mean_precip_along_beam = precip_along_beam.mean().values.item()
-            df_data.append({
-                'dZ_stats_idx': row.name,
-                'scan_idx': scan_idx,
-                'rhi_time': time,
-                'storm_time': storm_time,
-                'mean_precip_along_beam': mean_precip_along_beam,
-                'nstorms': len(unique_storm_labels),
-                **{f'storm_label{j + 1}': int(unique_storm_labels[j]) for j in range(len(unique_storm_labels))},
-                **{f'storm_idx{j + 1}': storm_label_to_idx(df_storms, storm_time, unique_storm_labels[j])
-                   for j in range(len(unique_storm_labels))},
-            })
-            logger.debug(df_data[-1])
+        df_data.append({
+            'dZ_stats_idx': bs.row.name,
+            'scan_idx': bs.scan_idx,
+            'rhi_time': bs.time,
+            'storm_time': storm_time,
+            'mean_precip_along_beam': bs.mean_precip_along_beam,
+            'nstorms': len(unique_storm_labels),
+            **{f'storm_label{j + 1}': int(unique_storm_labels[j]) for j in range(len(unique_storm_labels))},
+            **{f'storm_idx{j + 1}': storm_label_to_idx(df_storms, storm_time, unique_storm_labels[j])
+               for j in range(len(unique_storm_labels))},
+        })
+        logger.debug(df_data[-1])
 
     df_rhi_storm_stats = pd.DataFrame(df_data)
     logger.debug(df_rhi_storm_stats)
@@ -863,10 +959,8 @@ def plot_rhi_storm_intersections(da, ds_sub, i, figdir, scan_idx, storm_labels, 
     ax1.set_xlim((mid_x - L, mid_x + L))
     ax1.set_ylim((mid_y - L, mid_y + L))
 
-    levels = [0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64]
-    colors = ((0, 0, 0.6), 'b', 'c', 'g', 'y', (1, 0.5, 0), 'r', 'm', (0.6, 0.6, 0.6))
-
-    ax1.contourf(da.eastings, da.northings, da.sel(time=time, method='nearest'), levels=levels, colors=colors)
+    ax1.contourf(da.eastings, da.northings, da.sel(time=time, method='nearest'), levels=conf.RADARNET_LEVELS,
+                 colors=conf.RADARNET_COLORS)
     for label in unique_storm_labels:
         pdata = storm_labels.values == label
         pdata = np.ma.masked_array(pdata, pdata == 0)
@@ -974,7 +1068,8 @@ def append_analysis_stats(key, df_dZ_stats, df_rhi_storm_stats, df_storms, analy
 def analyse_match_rhis_to_storms_inputs(case, simple_track_variant):
     inputs = find_candidate_delta_z_outputs(case)
     inputs.update(gather_delta_z_stats_outputs(case))
-    for tracking_precip_thresh, dZ_stats_filters in product([1., 3., 5.], ['all_cloud', 'high_cloud']):
+    inputs['radarnet'] = conf.radarnet_path(case)
+    for tracking_precip_thresh, dZ_stats_filters in product(TRACKING_PRECIP_THRESHS, DZ_STATS_FILTERS):
         key2 = f'_{tracking_precip_thresh}_{dZ_stats_filters}'
         match_output = match_rhis_to_storms_outputs(case, tracking_precip_thresh, dZ_stats_filters, simple_track_variant)
         inputs.update({k + key2: v for k, v in match_output.items()})
@@ -982,8 +1077,8 @@ def analyse_match_rhis_to_storms_inputs(case, simple_track_variant):
 
 
 def analyse_match_rhis_to_storms_outputs(case, simple_track_variant):
-    outdir = conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
-    figdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
+    outdir = conf.deltaZ_outdir(case)
+    figdir = conf.deltaZ_figdir(case)
     return {
         'analyse_match_rhi_storm_stats': (outdir / 'rhi_storm_match' / f'simple_track_{simple_track_variant}' /
                                           f'tracking_precip_thresh' / f'analyse_match_rhi_storm_stats.hdf'),
@@ -998,6 +1093,8 @@ def analyse_match_rhis_to_storms_outputs(case, simple_track_variant):
     matrix={'case': conf.CASES, 'simple_track_variant': SIMPLE_TRACK_VARIANTS},
     depends_on=[match_rhis_to_storms],
     uses={
+        'TRACKING_PRECIP_THRESHS': TRACKING_PRECIP_THRESHS,
+        'DZ_STATS_FILTERS': DZ_STATS_FILTERS,
         'load_data': load_data,
         'append_analysis_stats': append_analysis_stats,
         'plot_full_corr_matrix': plot_full_corr_matrix,
@@ -1007,9 +1104,9 @@ def analyse_match_rhis_to_storms(inputs, outputs, case, simple_track_variant):
     from loguru import logger
     logger.info(case)
     analysis_stats = []
-    for tracking_precip_thresh in [1., 3., 5.]:
+    for tracking_precip_thresh in TRACKING_PRECIP_THRESHS:
         _, df_dZ_stats, df_storms, _, _ = load_data(case, inputs, tracking_precip_thresh, simple_track_variant)
-        for dZ_stats_filters in ['all_cloud', 'high_cloud']:
+        for dZ_stats_filters in DZ_STATS_FILTERS:
             key = f'{tracking_precip_thresh}_{dZ_stats_filters}'
             logger.info(key)
 
@@ -1026,14 +1123,14 @@ def analyse_match_rhis_to_storms(inputs, outputs, case, simple_track_variant):
         Path(outputs['fig_dummy']).touch()
         return
 
-    for tracking_precip_thresh, dZ_stats_filters in product([1., 3., 5.], ['all_cloud', 'high_cloud']):
+    for tracking_precip_thresh, dZ_stats_filters in product(TRACKING_PRECIP_THRESHS, DZ_STATS_FILTERS):
         key = f'{tracking_precip_thresh}_{dZ_stats_filters}'
         df_analysis_matches = df_analysis_matches_full[df_analysis_matches_full.settings == key]
 
         plot_full_corr_matrix(case, tracking_precip_thresh, dZ_stats_filters, df_analysis_matches, outputs)
 
     fig, axes = plt.subplots(1, 6, figsize=(20, 4), layout='constrained')
-    for ax, (tracking_precip_thresh, dZ_stats_filters) in zip(axes, product([1., 3., 5.], ['all_cloud', 'high_cloud'])):
+    for ax, (tracking_precip_thresh, dZ_stats_filters) in zip(axes, product(TRACKING_PRECIP_THRESHS, DZ_STATS_FILTERS)):
         key = f'{tracking_precip_thresh}_{dZ_stats_filters}'
         df_analysis_matches = df_analysis_matches_full[df_analysis_matches_full.settings == key]
         ax.scatter(df_analysis_matches.area, df_analysis_matches.deltaZ_mean_20dBZ)
@@ -1062,7 +1159,7 @@ def analyse_all_match_rhis_to_storms_inputs(simple_track_variant):
 
 
 def analyse_all_match_rhis_to_storms_outputs(simple_track_variant):
-    figdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / 'all' / 'camra' / 'deltaZ_candidate'
+    figdir = conf.deltaZ_figdir('all')
     return {
         'fig_dummy': (figdir / 'rhi_storm_match' / f'simple_track_{simple_track_variant}' /
                       'tracking_precip_thresh' / 'fig_dummy.out'),
@@ -1075,6 +1172,8 @@ def analyse_all_match_rhis_to_storms_outputs(simple_track_variant):
     matrix={'simple_track_variant': SIMPLE_TRACK_VARIANTS},
     depends_on=[analyse_match_rhis_to_storms],
     uses={
+        'TRACKING_PRECIP_THRESHS': TRACKING_PRECIP_THRESHS,
+        'DZ_STATS_FILTERS': DZ_STATS_FILTERS,
         'plot_full_corr_matrix': plot_full_corr_matrix,
         'annotate_fit_with_line': annotate_fit_with_line,
         'chi2': chi2,    },
@@ -1132,7 +1231,7 @@ def analyse_all_match_rhis_to_storms(inputs, outputs, simple_track_variant):
     print("\n--- Alternative Model Summary (Standardized) ---")
     print(m1.summary())
 
-    for tracking_precip_thresh, dZ_stats_filters in product([1., 3., 5.], ['all_cloud', 'high_cloud']):
+    for tracking_precip_thresh, dZ_stats_filters in product(TRACKING_PRECIP_THRESHS, DZ_STATS_FILTERS):
         key = f'{tracking_precip_thresh}_{dZ_stats_filters}'
         df_analysis_matches = df_analysis_matches_full[df_analysis_matches_full.settings == key]
 
@@ -1145,7 +1244,7 @@ def analyse_all_match_rhis_to_storms(inputs, outputs, simple_track_variant):
                                   df_analysis_matches_stage, outputs)
 
     fig, axes = plt.subplots(1, 6, figsize=(20, 4), layout='constrained')
-    for ax, (tracking_precip_thresh, dZ_stats_filters) in zip(axes, product([1., 3., 5.], ['all_cloud', 'high_cloud'])):
+    for ax, (tracking_precip_thresh, dZ_stats_filters) in zip(axes, product(TRACKING_PRECIP_THRESHS, DZ_STATS_FILTERS)):
         key = f'{tracking_precip_thresh}_{dZ_stats_filters}'
         df_analysis_matches = df_analysis_matches_full[df_analysis_matches_full.settings == key]
         ax.scatter(df_analysis_matches.area, df_analysis_matches.deltaZ_mean_20dBZ)
@@ -1169,6 +1268,7 @@ rmk.add_rules([
     find_candidate_delta_z,
     compare_delta_z_candidates,
     gather_delta_z_stats,
+    compare_rhis_to_radarnet,
     match_rhis_to_storms,
     analyse_match_rhis_to_storms,
     analyse_all_match_rhis_to_storms,

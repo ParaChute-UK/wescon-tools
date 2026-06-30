@@ -122,7 +122,7 @@ class DeltaZCandidateContext:
 
 
 def find_candidate_delta_z_outputs(case):
-    outdir = conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
+    outdir = conf.deltaZ_outdir(case)
     return {'candidate_scans': outdir / f'{case}_scans.hdf', 'brackets': outdir / 'dZ_candidates.hdf', }
 
 
@@ -205,8 +205,8 @@ def compare_delta_z_inputs(case):
 
 
 def compare_delta_z_outputs(case, bracket_idx1, bracket_idx2):
-    outdir = conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
-    figdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'deltaZ_candidate'
+    outdir = conf.deltaZ_outdir(case)
+    figdir = conf.deltaZ_figdir(case)
     return {
         'dZ_stats': outdir / 'comparison' / f'{case}_{bracket_idx1}_{bracket_idx2}' / 'dZ_stats.hdf',
         'fig_dummy': figdir / 'comparison' / f'{case}_{bracket_idx1}_{bracket_idx2}' / 'fig_dummy.out',
@@ -536,8 +536,8 @@ wind angle from: {wind_angle_from:.2f}$\degree$'''
         da1 = ds1.radarnet_flow_interped_rain.mean(dim='time')
         da2 = ds2.radarnet_flow_interped_rain.mean(dim='time')
 
-        levels = [0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64]
-        colors = ((0, 0, 0.6), 'b', 'c', 'g', 'y', (1, 0.5, 0), 'r', 'm', (0.6, 0.6, 0.6))
+        levels = conf.RADARNET_LEVELS
+        colors = conf.RADARNET_COLORS
         im = ax1.contourf((da1.eastings - CHIL_X) / 1e3, (da1.northings - CHIL_Y) / 1e3, da1, levels=levels,
                           colors=colors)
         im = ax2.contourf((da2.eastings - CHIL_X) / 1e3, (da2.northings - CHIL_Y) / 1e3, da2, levels=levels,
@@ -618,8 +618,8 @@ wind angle from: {wind_angle_from:.2f}$\degree$'''
     def plot_radarnet_combined(ds1, ds2, ax, xmin, xmax):
         ds_comp = xr.concat([ds1, ds2], dim='time')
         da = ds_comp.radarnet_flow_interped_rain.mean(dim='time')
-        levels = [0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64]
-        colors = ((0, 0, 0.6), 'b', 'c', 'g', 'y', (1, 0.5, 0), 'r', 'm', (0.6, 0.6, 0.6))
+        levels = conf.RADARNET_LEVELS
+        colors = conf.RADARNET_COLORS
         im = ax.contourf((da.eastings - CHIL_X) / 1e3, (da.northings - CHIL_Y) / 1e3, da, levels=levels, colors=colors)
 
         for ds in [ds1, ds2]:
@@ -742,9 +742,6 @@ wind angle from: {wind_angle_from:.2f}$\degree$'''
                 cl2=(("comparison_id",), [cl2]), ), )
 
         to_netcdf_tmp_then_copy(ds_out, output_path)
-
-    def get_obj_field_for_stats(objs, cl, field):
-        return get_obj_field(objs, cl, field)
 
     def process_cloud_match(cl1, cl2, ds1, ds2, ds1_comp, ds2_comp, w_plane_hr,
                             labels1, labels2, objs1, objs2,

@@ -24,6 +24,27 @@ DATADIR = PATHS['datadir']
 SIMDIR = DATADIR / 'UM_sims'
 N_ENS_MEM = 10
 
+# RadarNet rainfall plotting palette (from Kirsty Hanley). Shared across every
+# wescon_radar_dev / delta_z plot that contourf-s the RadarNet rain field.
+RADARNET_LEVELS = [0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64]
+RADARNET_COLORS = ((0, 0, 0.6), 'b', 'c', 'g', 'y', (1, 0.5, 0), 'r', 'm', (0.6, 0.6, 0.6))
+
+
+def deltaZ_outdir(case):
+    """Output dir for the deltaZ-candidate analysis of a single case (or 'all')."""
+    return PATHS['outdir'] / 'wescon_radar_dev' / WESCON_RADAR_DEV_OUTPUT_VN / case / 'camra' / 'deltaZ_candidate'
+
+
+def deltaZ_figdir(case):
+    """Figure dir for the deltaZ-candidate analysis of a single case (or 'all')."""
+    return PATHS['figdir'] / 'wescon_radar_dev' / WESCON_RADAR_DEV_OUTPUT_VN / case / 'camra' / 'deltaZ_candidate'
+
+
+def radarnet_path(case):
+    """Path to the converted RadarNet rainfall .nc for a case (YYYYMMDD)."""
+    return (PATHS['datadir'] / 'remake3' / 'radarnet' / case[:4] / case[4:6] / case[6:8] /
+            f'metoffice-c-band-rain-radar_uk_{case}.nc')
+
 # CASES = ['20230803', '20230815']
 CASES = [
     '20230609',
