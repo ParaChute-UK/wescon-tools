@@ -758,21 +758,17 @@ def match_rhis_to_storms_outputs(case, tracking_precip_thresh, dZ_stats_filters,
                                       f'match_rhi_storm_stats.{dZ_stats_filters}.hdf')}
 
 
-def calc_marshall_palmer(ds_subs, method='marshall1955', height=1):
+def calc_marshall_palmer(ds_sub, method='marshall1955', height=1):
     ab_map = {
         'marshall1955': (200, 1.6),
         'marshallpalmer1948': (237, 1.5),
-        'WSR-88D': (300, 1.4),
+        'WSR-88D': (300, 1.4), # https://doi.org/10.1175/1520-0434(1998)013%3C0377:TWRA%3E2.0.CO;2
     }
     a, b = ab_map[method]
-    rainfall = {}
-    for i in [1, 2]:
-        ds_sub = ds_subs[i]
-        dBZ = ds_sub.sel(z=height).rhi_Z.values
-        Z = 10**(dBZ / 10)
-        R = (Z / a)**b
-        rainfall[i] = R
-    return rainfall
+    dBZ = ds_sub.sel(z=height).rhi_Z.values
+    Z = 10**(dBZ / 10)
+    R = (Z / a)**b
+    return R
 
 
 def load_rhis(df_candidate_scans, row, xmin, xmax):
@@ -789,7 +785,7 @@ def load_rhis(df_candidate_scans, row, xmin, xmax):
     }
 
 
-BeamScan = namedtuple('BeamScan', 'row scan_idx time az_mean ds_subs transect_x transect_y mean_precip_along_beam')
+BeamScan = namedtuple('BeamScan', 'row scan_idx time az_mean ds_sub transect_x transect_y mean_precip_along_beam')
 
 
 def iter_beam_scans(df_dZ_stats, df_candidate_scans, da_rain):
@@ -815,7 +811,7 @@ def iter_beam_scans(df_dZ_stats, df_candidate_scans, da_rain):
                 .interp(time=time, method='linear')
                 .interp(eastings=transect_x, northings=transect_y, method='linear')
             )
-            yield BeamScan(row, scan_idx, time, az_mean, ds_subs, transect_x, transect_y,
+            yield BeamScan(row, scan_idx, time, az_mean, ds_subs[scan_idx], transect_x, transect_y,
                            precip_along_beam.mean().values.item())
 
 
@@ -870,18 +866,238 @@ def compare_rhis_to_radarnet(inputs, outputs, case):
     df_data = []
     # fields available can be seen in stats_entry
     for bs in iter_beam_scans(df_dZ_stats, df_candidate_scans, da_rain):
-        rainfall = calc_marshall_palmer(bs.ds_subs, method='WSR-88D')
+        rainfall = calc_marshall_palmer(bs.ds_sub, method='WSR-88D')
         df_data.append({
             'dZ_stats_idx': bs.row.name,
             'scan_idx': bs.scan_idx,
             'rhi_time': bs.time,
             'mean_precip_along_beam': bs.mean_precip_along_beam,
-            'mp_rain': rainfall[bs.scan_idx].mean(),
+            'mp_rain': np.nanmean(rainfall),
         })
 
     df_rhi_rain_stats = pd.DataFrame(df_data)
     logger.debug(df_rhi_rain_stats)
     df_rhi_rain_stats.to_hdf(Path(outputs['compare_rhis_to_radarnet']), key='compare_rhis_to_radarnet')
+
+
+def analyse_compare_rhis_to_radarnet_inputs(case):
+    inputs = find_candidate_delta_z_outputs(case)
+    inputs.update(gather_delta_z_stats_outputs(case))
+    inputs['radarnet'] = conf.radarnet_path(case)
+    inputs.update(compare_rhis_to_radarnet_outputs(case))
+    return inputs
+
+
+def analyse_compare_rhis_to_radarnet_outputs(case):
+    outdir = conf.deltaZ_outdir(case)
+    figdir = conf.deltaZ_figdir(case)
+    return {
+        'analyse_compare_rhis_to_radarnet_stats': outdir / 'compare_rhis_to_radarnet' /
+                                                  'analyse_compare_rhis_to_radarnet.hdf',
+        'fig_dummy': figdir / 'compare_rhis_to_radarnet' / 'fig_dummy.out',
+    }
+
+
+@rule(
+    inputs=analyse_compare_rhis_to_radarnet_inputs,
+    outputs=analyse_compare_rhis_to_radarnet_outputs,
+    matrix={'case': conf.CASES},
+    depends_on=[compare_rhis_to_radarnet],
+)
+def analyse_compare_rhis_to_radarnet(inputs, outputs, case):
+    """Analyse compare_rhis_to_radarnet output (RHI-derived vs RadarNet precip).
+
+    Counterpart to analyse_match_rhis_to_storms, but for the compare_rhis_to_radarnet rule.
+    """
+    from loguru import logger
+    logger.info(case)
+    df_compare_rhis = pd.read_hdf(inputs['compare_rhis_to_radarnet'])
+    print(df_compare_rhis)
+    try:
+        df = pd.read_hdf(inputs['gathered_dZ_stats'], key='gathered_dZ_stats')
+    except FileNotFoundError:
+        logger.error('Cannot find gathered stats: you probably need to do a full rerun to generate this')
+        raise
+    # Only keep optimal along beam and aligned across beam.
+    if df.empty:
+        df_dZ_stats = df
+    else:
+        df_dZ_stats = df[df.optimal_parallel_offset & df.aligned_perp_offset]
+
+    print(df_dZ_stats)
+
+    analysis_stats = []
+    for i in range(0, len(df_compare_rhis), 2):
+        if i % 100 == 0:
+            logger.debug(f'{i + 1}/{len(df_compare_rhis)}')
+        match = df_compare_rhis.iloc[i]
+        # Note, df_rhi_storm_stats contains info for the first and second composite RHI in each dZ candidate.
+        # Only calc stats for the first, and use the second to calc only the change in along-beam precip.
+        match2 = df_compare_rhis.iloc[i + 1]
+        row_stats = df_dZ_stats.loc[match.dZ_stats_idx]
+
+        dt = (match2.rhi_time - match.rhi_time).total_seconds()
+        analysis_stats.append({
+            'match_idx': i,
+            # 'dt': dt,
+            # Correlation plot will be done on everything past here.
+            'mean_precip_along_beam': (match.mean_precip_along_beam + match2.mean_precip_along_beam) / 2,
+            'delta_precip_along_beam': (match2.mean_precip_along_beam - match.mean_precip_along_beam) / dt,
+            'mean_mp_precip_along_beam': (match.mp_rain + match2.mp_rain) / 2,
+            'delta_mp_precip_along_beam': (match2.mp_rain - match.mp_rain) / dt,
+            'deltaZ_mean': row_stats.deltaZ_mean,
+            'deltaZ_absmean': row_stats.deltaZ_absmean,
+            'deltaZ_posmean': row_stats.deltaZ_posmean,
+            'deltaZ_mean_20dBZ': row_stats.deltaZ_mean_20dBZ,
+            'deltaZ_absmean_20dBZ': row_stats.deltaZ_absmean_20dBZ,
+            'deltaZ_posmean_20dBZ': row_stats.deltaZ_posmean_20dBZ,
+        })
+    df_analysis_full = pd.DataFrame(analysis_stats)
+    df_analysis_full['case'] = case
+
+    figdir = Path(outputs['fig_dummy']).parent
+    # Skip settings, match_idx and dt.
+    cols = df_analysis_full.columns.tolist()[1:]
+    xcols = [c for c in cols if (c.startswith('deltaZ') or 'mp' in c)]
+    ycols = [c for c in cols if not (c.startswith('deltaZ')) and c not in ['case']]
+
+    # If only showing partial set.
+    g = sns.pairplot(df_analysis_full[cols], x_vars=xcols, y_vars=ycols, diag_kind='kde')
+    g.map(annotate_fit_with_line)
+    g.figure.suptitle(f'{case} N={len(df_analysis_full)}')
+    g.figure.subplots_adjust(top=0.96)
+    figpath = figdir / f'analysis_compare_rhis_to_radarnet.corr.{case}.png'
+    logger.info(f'saving to {figpath}')
+    plt.savefig(figpath)
+
+    df_analysis_full.to_hdf(Path(outputs['analyse_compare_rhis_to_radarnet_stats']),
+                            key='analyse_compare_rhis_to_radarnet_stats')
+    Path(outputs['fig_dummy']).touch()
+
+
+def annotate_fit_with_line(x, y, **kws):
+    # clean data
+    ax = kws.get('ax', plt.gca())
+    mask = x.notna() & y.notna()
+    x_clean, y_clean = x[mask], y[mask]
+
+    if len(x_clean) > 1 and x_clean.nunique() > 1:
+        # Calculate linear regression
+        slope, intercept, r, p, stderr = spstats.linregress(x_clean, y_clean)
+
+        # We create two points at the min and max of x to draw the line
+        x_vals = np.array([x_clean.min(), x_clean.max()])
+        y_vals = intercept + slope * x_vals
+        ax.plot(x_vals, y_vals, 'r--', lw=2)  # Red dashed line
+
+        is_interesting = (r ** 2 >= 0.05) and (p <= 0.01)
+        edge_colour = "green" if is_interesting else "none"
+        face_colour = "green" if is_interesting else "white"
+        line_width = 1.5 if is_interesting else 0
+
+        # 5. Annotate text
+        msg = f'$r^2$={r ** 2:.2f}\n$p$={p:.2g}'
+        ax.text(0.05, 0.9, msg, transform=ax.transAxes,
+                fontsize=10, verticalalignment='top',
+                bbox=dict(boxstyle="round,pad=0.3", fc=face_colour, ec=edge_colour, lw=line_width, alpha=0.5))
+
+
+def analyse_all_compare_rhis_to_radarnet_inputs():
+    inputs = {}
+    for case in conf.CASES:
+        case_outputs = analyse_compare_rhis_to_radarnet_outputs(case)
+        inputs[f'{case}_analyse_compare_rhis_to_radarnet_stats'] = case_outputs['analyse_compare_rhis_to_radarnet_stats']
+    return inputs
+
+
+def analyse_all_compare_rhis_to_radarnet_outputs():
+    figdir = conf.deltaZ_figdir('all')
+    return {
+        'fig_dummy': figdir / 'compare_rhis_to_radarnet' / 'fig_dummy.out',
+    }
+
+
+@rule(
+    inputs=analyse_all_compare_rhis_to_radarnet_inputs,
+    outputs=analyse_all_compare_rhis_to_radarnet_outputs,
+    depends_on=[analyse_compare_rhis_to_radarnet],
+    uses={
+        'annotate_fit_with_line': annotate_fit_with_line,
+        'chi2': chi2,
+    },
+)
+def analyse_all_compare_rhis_to_radarnet(inputs, outputs):
+    """Analyse compare_rhis_to_radarnet output across all cases.
+
+    Counterpart to analyse_all_match_rhis_to_storms, but for the compare_rhis_to_radarnet rule.
+    """
+    from loguru import logger
+    dfs = []
+    for case in conf.CASES:
+        df_analysis_full = pd.read_hdf(inputs[f'{case}_analyse_compare_rhis_to_radarnet_stats'],
+                                        key='analyse_compare_rhis_to_radarnet_stats')
+        if df_analysis_full.empty:
+            logger.warning(f'No analysis matches found for {case} — skipping')
+            continue
+        dfs.append(df_analysis_full)
+
+    if not dfs:
+        logger.warning('No analysis matches found for any case — skipping plots')
+        Path(outputs['fig_dummy']).touch()
+        return
+
+    df_analysis_full_all = pd.concat(dfs, ignore_index=True)
+
+    # This code is from Gemini. See this conversation: https://gemini.google.com/app/2e11a09d16a660ea
+
+    # 1. Create a copy to safely add standardized columns
+    df = df_analysis_full_all.copy()
+
+    # 2. Standardize both variables (z-score: (x - mean) / std)
+    df['precip_std'] = (df['delta_precip_along_beam'] - df['delta_precip_along_beam'].mean()) / df[
+        'delta_precip_along_beam'].std()
+    df['deltaZ_std'] = (df['deltaZ_mean'] - df['deltaZ_mean'].mean()) / df['deltaZ_mean'].std()
+
+    # 3. Fit Null Model (fixed slope, random intercept) using the standardized variables
+    m0 = smf.mixedlm(
+        "precip_std ~ deltaZ_std",
+        df,
+        groups=df["case"]
+    ).fit(reml=False)
+
+    # 4. Fit Alternative Model (random intercept AND random slope)
+    m1 = smf.mixedlm(
+        "precip_std ~ deltaZ_std",
+        df,
+        groups=df["case"],
+        re_formula="~deltaZ_std"
+    ).fit(reml=False)
+
+    # 5. Likelihood Ratio Test
+    lrt_stat = 2 * (m1.llf - m0.llf)
+    df_diff = m1.df_modelwc - m0.df_modelwc
+    p_val = chi2.sf(lrt_stat, df=df_diff)
+
+    print(f"LRT Statistic: {lrt_stat:.2f}")
+    print(f"p-value for heterogeneity: {p_val:.2e}")
+    print("\n--- Alternative Model Summary (Standardized) ---")
+    print(m1.summary())
+
+    figdir = Path(outputs['fig_dummy']).parent
+    # Skip case and match_idx.
+    cols = df_analysis_full_all.columns.tolist()[1:]
+    xcols = [c for c in cols if (c.startswith('deltaZ') or 'mp' in c)]
+    ycols = [c for c in cols if not (c.startswith('deltaZ')) and c not in ['case']]
+
+    g = sns.pairplot(df_analysis_full_all[cols], x_vars=xcols, y_vars=ycols, diag_kind='kde')
+    g.map(annotate_fit_with_line)
+    g.figure.suptitle(f'all N={len(df_analysis_full_all)}')
+    g.figure.subplots_adjust(top=0.96)
+    figpath = figdir / 'analysis_compare_rhis_to_radarnet.corr.all.png'
+    logger.info(f'saving to {figpath}')
+    plt.savefig(figpath)
+
+    Path(outputs['fig_dummy']).touch()
 
 
 @rule(
@@ -972,33 +1188,6 @@ def plot_rhi_storm_intersections(da, ds_sub, i, figdir, scan_idx, storm_labels, 
     plt.close('all')
 
 
-def annotate_fit_with_line(x, y, **kws):
-    # clean data
-    ax = kws.get('ax', plt.gca())
-    mask = x.notna() & y.notna()
-    x_clean, y_clean = x[mask], y[mask]
-
-    if len(x_clean) > 1 and x_clean.nunique() > 1:
-        # Calculate linear regression
-        slope, intercept, r, p, stderr = spstats.linregress(x_clean, y_clean)
-
-        # We create two points at the min and max of x to draw the line
-        x_vals = np.array([x_clean.min(), x_clean.max()])
-        y_vals = intercept + slope * x_vals
-        ax.plot(x_vals, y_vals, 'r--', lw=2)  # Red dashed line
-
-        is_interesting = (r ** 2 >= 0.05) and (p <= 0.01)
-        edge_colour = "green" if is_interesting else "none"
-        face_colour = "green" if is_interesting else "white"
-        line_width = 1.5 if is_interesting else 0
-
-        # 5. Annotate text
-        msg = f'$r^2$={r ** 2:.2f}\n$p$={p:.2g}'
-        ax.text(0.05, 0.9, msg, transform=ax.transAxes,
-                fontsize=10, verticalalignment='top',
-                bbox=dict(boxstyle="round,pad=0.3", fc=face_colour, ec=edge_colour, lw=line_width, alpha=0.5))
-
-
 def plot_full_corr_matrix(case, tracking_precip_thresh, dZ_stats_filters, df_analysis_matches, outputs):
     figdir = Path(outputs['fig_dummy']).parent
     # Skip settings, match_idx and dt.
@@ -1041,7 +1230,10 @@ def append_analysis_stats(key, df_dZ_stats, df_rhi_storm_stats, df_storms, analy
             continue
 
         row_delta = df_storms_either_side[['time', 'area', 'extreme', 'meanfield']].diff().iloc[-1]
-        dt = row_delta.time.seconds
+        # DONE: This is NOT RIGHT! Should use dt from match1/match2.
+        # dt = row_delta.time.seconds
+        # This is correct.
+        dt = (match2.rhi_time - match.rhi_time).total_seconds()
         analysis_stats.append({
             'settings': key,
             'match_idx': i,
@@ -1262,6 +1454,86 @@ def analyse_all_match_rhis_to_storms(inputs, outputs, simple_track_variant):
     plt.savefig(figpath)
 
 
+# Fixed example task for display_hdf_schemas: one case, first setting of every other axis.
+DISPLAY_HDF_CASE = '20230803'
+DISPLAY_HDF_TRACKING_PRECIP_THRESH = TRACKING_PRECIP_THRESHS[0]
+DISPLAY_HDF_DZ_STATS_FILTER = DZ_STATS_FILTERS[0]
+DISPLAY_HDF_SIMPLE_TRACK_VARIANT = SIMPLE_TRACK_VARIANTS[0]
+
+
+def display_hdf_schemas_inputs():
+    case = DISPLAY_HDF_CASE
+    inputs = {}
+    inputs.update(find_candidate_delta_z_outputs(case))  # candidate_scans, brackets
+    inputs.update(gather_delta_z_stats_outputs(case))  # gathered_dZ_stats
+    inputs.update(compare_rhis_to_radarnet_outputs(case))  # compare_rhis_to_radarnet
+    inputs.update(match_rhis_to_storms_outputs(
+        case, DISPLAY_HDF_TRACKING_PRECIP_THRESH, DISPLAY_HDF_DZ_STATS_FILTER, DISPLAY_HDF_SIMPLE_TRACK_VARIANT))
+    inputs['analyse_match_rhi_storm_stats'] = analyse_match_rhis_to_storms_outputs(
+        case, DISPLAY_HDF_SIMPLE_TRACK_VARIANT)['analyse_match_rhi_storm_stats']
+    return inputs
+
+
+def display_hdf_schemas_outputs():
+    return {'schema_txt': conf.deltaZ_outdir(DISPLAY_HDF_CASE) / 'hdf_schema_reference.txt'}
+
+
+@rule(
+    inputs=display_hdf_schemas_inputs,
+    outputs=display_hdf_schemas_outputs,
+    depends_on=[find_candidate_delta_z, compare_delta_z_candidates, gather_delta_z_stats,
+                compare_rhis_to_radarnet, match_rhis_to_storms, analyse_match_rhis_to_storms],
+    uses={'DISPLAY_HDF_CASE': DISPLAY_HDF_CASE},
+)
+def display_hdf_schemas(inputs, outputs):
+    """Dump the schema of every other rule's .hdf output as human-readable text.
+
+    Handy reference for what each pipeline .hdf file contains. Fixed to one example
+    task (case='20230803', first setting of every other threshold/variant) rather than
+    expanding over the full matrix. compare_delta_z_candidates' dZ_stats.hdf isn't in
+    `inputs` because its bracket_idx1/idx2 matrix is only known at runtime (dynamic,
+    @deferrable) - it's located here by globbing for the first one on disk instead.
+    """
+    from loguru import logger
+
+    lines = []
+
+    def describe(name, path, key=None):
+        lines.append(f'=== {name} ===')
+        lines.append(f'path: {path}')
+        if not Path(path).exists():
+            lines.append('(missing)')
+            lines.append('')
+            return
+        try:
+            df = pd.read_hdf(path, key=key)
+        except Exception as e:
+            lines.append(f'(failed to read: {e})')
+            lines.append('')
+            return
+        lines.append(f'shape: {df.shape}')
+        lines.append('dtypes:')
+        lines.append(df.dtypes.to_string())
+        lines.append('head:')
+        lines.append(df.head().to_string())
+        lines.append('')
+
+    for name, path in inputs.items():
+        describe(name, path, key=name)
+
+    comparison_dir = conf.deltaZ_outdir(DISPLAY_HDF_CASE) / 'comparison'
+    dz_stats_paths = sorted(comparison_dir.glob('*/dZ_stats.hdf'))
+    if dz_stats_paths:
+        describe('dZ_stats', dz_stats_paths[0], key='dZ_stats')
+    else:
+        lines.append('=== dZ_stats ===')
+        lines.append(f'(no dZ_stats.hdf found under {comparison_dir})')
+        lines.append('')
+
+    Path(outputs['schema_txt']).write_text('\n'.join(lines))
+    logger.info(f"wrote {outputs['schema_txt']}")
+
+
 rmk.add_rules([
     regrid_camra_kepler_l1,
     plot_regridded_camra_kepler_l1,
@@ -1269,7 +1541,10 @@ rmk.add_rules([
     compare_delta_z_candidates,
     gather_delta_z_stats,
     compare_rhis_to_radarnet,
+    analyse_compare_rhis_to_radarnet,
+    analyse_all_compare_rhis_to_radarnet,
     match_rhis_to_storms,
     analyse_match_rhis_to_storms,
     analyse_all_match_rhis_to_storms,
+    display_hdf_schemas,
 ])
