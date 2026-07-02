@@ -27,7 +27,6 @@ from collections import namedtuple
 from dataclasses import dataclass
 from itertools import batched, product
 from pathlib import Path
-from typing import Any
 
 import cartopy.crs as ccrs
 import matplotlib.gridspec as gridspec
@@ -39,8 +38,6 @@ import seaborn as sns
 import statsmodels.formula.api as smf
 import xarray as xr
 from loguru import logger
-from matplotlib import patches
-from scipy.signal import find_peaks
 from scipy.stats import chi2
 
 from remake import Defer, Remake, deferrable, rule
@@ -48,7 +45,6 @@ from simple_track.nimrod_user_functions import FileLoader
 from wescon_tools import proj_config as conf
 from wescon_tools.custom_osgb import CustomOSGB
 from wescon_tools.flow_interp import FlowInterp
-from wescon_tools.match_rhi_to_3d_winds import MatchRHIto3dWinds, Plot3dWinds
 from wescon_tools.radar_intersection import RadarIntersectionCalculator, RadarIntersection
 from wescon_tools.radar_util import add_cartesian_coords, RadarRegridder, xr_find_cloud_objects
 from wescon_tools.util import to_netcdf_tmp_then_copy
@@ -951,6 +947,8 @@ def analyse_compare_rhis_to_radarnet(inputs, outputs, case):
             'deltaZ_mean_20dBZ': row_stats.deltaZ_mean_20dBZ,
             'deltaZ_absmean_20dBZ': row_stats.deltaZ_absmean_20dBZ,
             'deltaZ_posmean_20dBZ': row_stats.deltaZ_posmean_20dBZ,
+            '3d_wind_max_w': row_stats['3d_wind_max_w'],
+            '3d_wind_mean_w': row_stats['3d_wind_mean_w'],
         })
     df_analysis_full = pd.DataFrame(analysis_stats)
 
@@ -1298,6 +1296,8 @@ def append_analysis_stats(key, df_dZ_stats, df_rhi_storm_stats, df_storms, analy
             'deltaZ_mean_20dBZ': row_stats.deltaZ_mean_20dBZ,
             'deltaZ_absmean_20dBZ': row_stats.deltaZ_absmean_20dBZ,
             'deltaZ_posmean_20dBZ': row_stats.deltaZ_posmean_20dBZ,
+            '3d_wind_max_w': row_stats['3d_wind_max_w'],
+            '3d_wind_mean_w': row_stats['3d_wind_mean_w'],
         })
 
 
