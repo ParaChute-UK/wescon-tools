@@ -953,6 +953,14 @@ def analyse_compare_rhis_to_radarnet(inputs, outputs, case):
             'deltaZ_posmean_20dBZ': row_stats.deltaZ_posmean_20dBZ,
         })
     df_analysis_full = pd.DataFrame(analysis_stats)
+
+    if df_analysis_full.empty:
+        logger.warning(f'No analysis matches found for {case} — skipping plots')
+        pd.DataFrame().to_hdf(Path(outputs['analyse_compare_rhis_to_radarnet_stats']),
+                              key='analyse_compare_rhis_to_radarnet_stats')
+        Path(outputs['fig_dummy']).touch()
+        return
+
     df_analysis_full['case'] = case
 
     figdir = Path(outputs['fig_dummy']).parent
@@ -962,17 +970,40 @@ def analyse_compare_rhis_to_radarnet(inputs, outputs, case):
     ycols = [c for c in cols if not (c.startswith('deltaZ')) and c not in ['case']]
 
     # If only showing partial set.
-    g = sns.pairplot(df_analysis_full[cols], x_vars=xcols, y_vars=ycols, diag_kind='kde')
-    g.map(annotate_fit_with_line)
+    g = plot_corr_grid(df_analysis_full[cols], xcols, ycols)
     g.figure.suptitle(f'{case} N={len(df_analysis_full)}')
     g.figure.subplots_adjust(top=0.96)
-    figpath = figdir / f'analysis_compare_rhis_to_radarnet.corr.{case}.png'
+    figpath = figdir / f'analysis_compare_rhis_to_radarnet.corr.{CORR_PLOT_KIND}.{case}.png'
     logger.info(f'saving to {figpath}')
     plt.savefig(figpath)
 
     df_analysis_full.to_hdf(Path(outputs['analyse_compare_rhis_to_radarnet_stats']),
                             key='analyse_compare_rhis_to_radarnet_stats')
     Path(outputs['fig_dummy']).touch()
+
+
+# Off-diagonal mark for the RHI-vs-radar correlation grids: 'scatter' or 'hexbin'.
+CORR_PLOT_KIND = 'scatter'
+
+
+def scatter(x, y, **kws):
+    # Off-diagonal scatter for the correlation grids. Strips seaborn's
+    # color/label kwargs and drops NaNs before handing off to ax.scatter.
+    ax = kws.get('ax', plt.gca())
+    mask = x.notna() & y.notna()
+    if mask.sum() == 0:
+        return
+    ax.scatter(x[mask], y[mask], s=15, alpha=0.5)
+
+
+def hexbin(x, y, **kws):
+    # Off-diagonal density plot for the correlation grids. Strips seaborn's
+    # color/label kwargs and drops NaNs before handing off to ax.hexbin.
+    ax = kws.get('ax', plt.gca())
+    mask = x.notna() & y.notna()
+    if mask.sum() == 0:
+        return
+    ax.hexbin(x[mask], y[mask], gridsize=25, mincnt=1, cmap='viridis')
 
 
 def annotate_fit_with_line(x, y, **kws):
@@ -1002,6 +1033,17 @@ def annotate_fit_with_line(x, y, **kws):
                 bbox=dict(boxstyle="round,pad=0.3", fc=face_colour, ec=edge_colour, lw=line_width, alpha=0.5))
 
 
+def plot_corr_grid(df, xcols, ycols):
+    """Build a RHI-vs-radar correlation PairGrid, using the CORR_PLOT_KIND off-diagonal mark."""
+    marks = {'scatter': scatter, 'hexbin': hexbin}
+    if CORR_PLOT_KIND not in marks:
+        raise ValueError(f'Unknown CORR_PLOT_KIND: {CORR_PLOT_KIND!r} (expected one of {list(marks)})')
+    g = sns.PairGrid(df, x_vars=xcols, y_vars=ycols)
+    g.map(marks[CORR_PLOT_KIND])
+    g.map(annotate_fit_with_line)
+    return g
+
+
 def analyse_all_compare_rhis_to_radarnet_inputs():
     inputs = {}
     for case in conf.CASES:
@@ -1023,6 +1065,10 @@ def analyse_all_compare_rhis_to_radarnet_outputs():
     depends_on=[analyse_compare_rhis_to_radarnet],
     uses={
         'annotate_fit_with_line': annotate_fit_with_line,
+        'plot_corr_grid': plot_corr_grid,
+        'CORR_PLOT_KIND': CORR_PLOT_KIND,
+        'scatter': scatter,
+        'hexbin': hexbin,
         'chi2': chi2,
     },
 )
@@ -1089,11 +1135,10 @@ def analyse_all_compare_rhis_to_radarnet(inputs, outputs):
     xcols = [c for c in cols if (c.startswith('deltaZ') or 'mp' in c)]
     ycols = [c for c in cols if not (c.startswith('deltaZ')) and c not in ['case']]
 
-    g = sns.pairplot(df_analysis_full_all[cols], x_vars=xcols, y_vars=ycols, diag_kind='kde')
-    g.map(annotate_fit_with_line)
+    g = plot_corr_grid(df_analysis_full_all[cols], xcols, ycols)
     g.figure.suptitle(f'all N={len(df_analysis_full_all)}')
     g.figure.subplots_adjust(top=0.96)
-    figpath = figdir / 'analysis_compare_rhis_to_radarnet.corr.all.png'
+    figpath = figdir / f'analysis_compare_rhis_to_radarnet.corr.{CORR_PLOT_KIND}.all.png'
     logger.info(f'saving to {figpath}')
     plt.savefig(figpath)
 
@@ -1196,11 +1241,10 @@ def plot_full_corr_matrix(case, tracking_precip_thresh, dZ_stats_filters, df_ana
     ycols = [c for c in cols if not (c.startswith('deltaZ')) and c not in ['case', 'stage']]
 
     # If only showing partial set.
-    g = sns.pairplot(df_analysis_matches[cols], x_vars=xcols, y_vars=ycols, diag_kind='kde')
-    g.map(annotate_fit_with_line)
+    g = plot_corr_grid(df_analysis_matches[cols], xcols, ycols)
     g.figure.suptitle(f'{case} thresh={tracking_precip_thresh} {dZ_stats_filters} N={len(df_analysis_matches)}')
     g.figure.subplots_adjust(top=0.96)
-    figpath = figdir / f'analysis_match_rhi_storm_stats.corr.{case}.thresh_{tracking_precip_thresh}.{dZ_stats_filters}.png'
+    figpath = figdir / f'analysis_match_rhi_storm_stats.corr.{CORR_PLOT_KIND}.{case}.thresh_{tracking_precip_thresh}.{dZ_stats_filters}.png'
     logger.info(f'saving to {figpath}')
     plt.savefig(figpath)
 
@@ -1290,7 +1334,11 @@ def analyse_match_rhis_to_storms_outputs(case, simple_track_variant):
         'load_data': load_data,
         'append_analysis_stats': append_analysis_stats,
         'plot_full_corr_matrix': plot_full_corr_matrix,
-        'annotate_fit_with_line': annotate_fit_with_line,    },
+        'annotate_fit_with_line': annotate_fit_with_line,
+        'plot_corr_grid': plot_corr_grid,
+        'CORR_PLOT_KIND': CORR_PLOT_KIND,
+        'scatter': scatter,
+        'hexbin': hexbin,    },
 )
 def analyse_match_rhis_to_storms(inputs, outputs, case, simple_track_variant):
     from loguru import logger
@@ -1368,6 +1416,10 @@ def analyse_all_match_rhis_to_storms_outputs(simple_track_variant):
         'DZ_STATS_FILTERS': DZ_STATS_FILTERS,
         'plot_full_corr_matrix': plot_full_corr_matrix,
         'annotate_fit_with_line': annotate_fit_with_line,
+        'plot_corr_grid': plot_corr_grid,
+        'CORR_PLOT_KIND': CORR_PLOT_KIND,
+        'scatter': scatter,
+        'hexbin': hexbin,
         'chi2': chi2,    },
 )
 def analyse_all_match_rhis_to_storms(inputs, outputs, simple_track_variant):
