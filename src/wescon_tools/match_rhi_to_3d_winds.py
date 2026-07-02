@@ -16,7 +16,7 @@ CHIL_Y = 138620
 
 class MatchRHIto3dWinds:
     def __init__(self, ds_rad, time_interp=True, winddir=Path('/gws/pw/j07/woest/rjthomps/winds3d/data/'),
-                 filetpl='%Y%m%d/grid_1000m_filter_1_0_%Y%m%d_%H%M_v6.1.nc'):
+                 filetpl='%Y%m%d/grid_1000m_filter_1_0_%Y%m%d_%H%M_v8.0.nc'):
         self.ds_rad = ds_rad
         self.time_interp = time_interp
         self.winddir = winddir
