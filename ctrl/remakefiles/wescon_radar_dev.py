@@ -195,8 +195,9 @@ def regrid_outputs(case, radar, batch_idx):
         'FlowInterp': FlowInterp,
         'to_netcdf_tmp_then_copy': to_netcdf_tmp_then_copy,    },
 )
-def regrid_camra_kepler_l1(inputs, outputs, case, radar, batch_idx):
-    """Regrid the CAMRa or Kepler data from polar coords to cartesian grid."""
+def build_gridded_rhi_scans(inputs, outputs, case, radar, batch_idx):
+    """Build per-scan gridded datasets: regrid CAMRa/Kepler polar->cartesian AND
+    flow-interp the RadarNet rain to the scan time (plus cloud-object detection)."""
     from loguru import logger
 
     def setup_grid(radar, dx=settings.default_regrid_dx, dz=settings.default_regrid_dz):
@@ -382,10 +383,10 @@ def plot_regridded_outputs(case, radar, batch_idx):
 
 
 @rule(
-    inputs=regrid_camra_kepler_l1.outputs,
+    inputs=build_gridded_rhi_scans.outputs,
     outputs=plot_regridded_outputs,
-    matrix=regrid_camra_kepler_l1.matrix,
-    depends_on=[regrid_camra_kepler_l1],
+    matrix=build_gridded_rhi_scans.matrix,
+    depends_on=[build_gridded_rhi_scans],
     uses={'plot_radarnet_rhi_transect': plot_radarnet_rhi_transect},
 )
 def plot_regridded_camra_kepler_l1(inputs, outputs, case, radar, batch_idx):
@@ -601,7 +602,7 @@ def find_candidate_delta_z_inputs(case):
     inputs=find_candidate_delta_z_inputs,
     outputs=find_candidate_delta_z_outputs,
     matrix={'case': conf.CASES},
-    depends_on=[regrid_camra_kepler_l1],
+    depends_on=[build_gridded_rhi_scans],
     uses={'settings': settings, 'find_brackets': find_brackets},
 )
 def find_candidate_delta_z(inputs, outputs, case):
@@ -1587,7 +1588,7 @@ def display_hdf_schemas(inputs, outputs):
 
 
 rmk.add_rules([
-    regrid_camra_kepler_l1,
+    build_gridded_rhi_scans,
     plot_regridded_camra_kepler_l1,
     find_candidate_delta_z,
     compare_delta_z_candidates,
