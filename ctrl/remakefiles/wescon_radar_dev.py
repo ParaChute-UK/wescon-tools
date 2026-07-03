@@ -640,6 +640,162 @@ def find_candidate_delta_z(inputs, outputs, case):
     brackets.to_hdf(Path(outputs['brackets']), key='brackets')
 
 
+# ---------------------------------------------------------------------------
+# Cloud-object statistics.
+#
+# build_gridded_rhi_scans already merges xr_find_cloud_objects output into every
+# gridded_*.nc: per-object cloud_area / cloud_*_x / cloud_*_z / cloud_*_Z on dims
+# (time, cloud_id, reflectivity_thresh). These two rules just gather those scattered
+# per-scan objects into a tidy per-day table + per-day summary stats (cloud-top
+# height = cloud_max_z [km]), then concat all days for a campaign-wide view.
+# ---------------------------------------------------------------------------
+
+# Per-object variables carried in each gridded_*.nc (see radar_util.xr_find_cloud_objects).
+# cloud_max_z is the cloud-top height [km]. Excludes the 2D 'cloud_labels' field.
+CLOUD_OBJ_VARS = [
+    'cloud_label', 'cloud_area',
+    'cloud_min_x', 'cloud_max_x', 'cloud_mean_x',
+    'cloud_min_z', 'cloud_max_z', 'cloud_mean_z',
+    'cloud_min_Z', 'cloud_max_Z', 'cloud_mean_Z',
+]
+
+
+def gather_cloud_object_stats_outputs(case):
+    outdir = conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / case / 'camra' / 'cloud_objects'
+    return {
+        'cloud_objects': outdir / 'cloud_objects.hdf',
+        'cloud_object_daily_stats': outdir / 'cloud_object_daily_stats.hdf',
+    }
+
+
+@rule(
+    inputs=find_candidate_delta_z_inputs,
+    outputs=gather_cloud_object_stats_outputs,
+    matrix={'case': conf.CASES},
+    depends_on=[build_gridded_rhi_scans],
+    uses={'CLOUD_OBJ_VARS': CLOUD_OBJ_VARS},
+)
+def gather_cloud_object_stats(inputs, outputs, case):
+    """Gather per-scan cloud objects into a tidy per-day table + per-day summary stats.
+
+    Reads the cloud_objs merged into every gridded_*.nc by build_gridded_rhi_scans,
+    flattens to one row per (scan time, cloud object, reflectivity_thresh), and
+    computes per-day, per-threshold stats (max/mean cloud-top height = cloud_max_z,
+    area, reflectivity). A row is kept only for thresholds the object actually
+    reaches (cloud_max_z non-nan), so higher thresholds naturally hold fewer objects.
+    """
+    from loguru import logger
+    logger.info(case)
+
+    dfs = []
+    for p in inputs.values():
+        ds = xr.open_dataset(p)
+        cobj_vars = [v for v in CLOUD_OBJ_VARS if v in ds.data_vars]
+        df = ds[cobj_vars].isel(time=0).to_dataframe().reset_index()
+        df['time'] = pd.Timestamp(ds.time.values.item())
+        # Unused cloud_id slots (and thresholds an object doesn't reach) are all-nan.
+        df = df.dropna(subset=['cloud_max_z'])
+        if not df.empty:
+            dfs.append(df)
+
+    if dfs:
+        df_objs = pd.concat(dfs, ignore_index=True)
+    else:
+        df_objs = pd.DataFrame(columns=['time', 'cloud_id', 'reflectivity_thresh'] + CLOUD_OBJ_VARS)
+    df_objs['case'] = case
+    logger.debug(f'{len(df_objs)} cloud-object rows for {case}')
+    df_objs.to_hdf(Path(outputs['cloud_objects']), key='cloud_objects')
+
+    if df_objs.empty:
+        logger.warning(f'No cloud objects found for {case}')
+        pd.DataFrame().to_hdf(Path(outputs['cloud_object_daily_stats']), key='cloud_object_daily_stats')
+        return
+
+    stats = (
+        df_objs.groupby('reflectivity_thresh')
+        .agg(
+            n_cloud_objs=('cloud_max_z', 'size'),
+            max_cloud_top=('cloud_max_z', 'max'),
+            mean_cloud_top=('cloud_max_z', 'mean'),
+            median_cloud_top=('cloud_max_z', 'median'),
+            std_cloud_top=('cloud_max_z', 'std'),
+            max_area=('cloud_area', 'max'),
+            mean_area=('cloud_area', 'mean'),
+            max_Z=('cloud_max_Z', 'max'),
+            mean_Z=('cloud_mean_Z', 'mean'),
+        )
+        .reset_index()
+    )
+    stats['case'] = case
+    logger.debug(stats)
+    stats.to_hdf(Path(outputs['cloud_object_daily_stats']), key='cloud_object_daily_stats')
+
+
+def gather_all_cloud_object_stats_inputs():
+    inputs = {}
+    for case in conf.CASES:
+        case_outputs = gather_cloud_object_stats_outputs(case)
+        inputs[f'{case}_cloud_object_daily_stats'] = case_outputs['cloud_object_daily_stats']
+    return inputs
+
+
+def gather_all_cloud_object_stats_outputs():
+    outdir = conf.PATHS['outdir'] / 'wescon_radar_dev' / output_vn / 'all' / 'camra' / 'cloud_objects'
+    figdir = conf.PATHS['figdir'] / 'wescon_radar_dev' / output_vn / 'all' / 'camra' / 'cloud_objects'
+    return {
+        'all_cloud_object_daily_stats': outdir / 'all_cloud_object_daily_stats.hdf',
+        'fig_dummy': figdir / 'fig_dummy.out',
+    }
+
+
+@rule(
+    inputs=gather_all_cloud_object_stats_inputs,
+    outputs=gather_all_cloud_object_stats_outputs,
+    depends_on=[gather_cloud_object_stats],
+)
+def gather_all_cloud_object_stats(inputs, outputs):
+    """Concat per-day cloud-object stats across all cases + a cloud-top-per-day plot."""
+    from loguru import logger
+    dfs = []
+    for case in conf.CASES:
+        df = pd.read_hdf(inputs[f'{case}_cloud_object_daily_stats'], key='cloud_object_daily_stats')
+        if df.empty:
+            logger.warning(f'No cloud-object stats for {case} — skipping')
+            continue
+        dfs.append(df)
+
+    if not dfs:
+        logger.warning('No cloud-object stats for any case — skipping plot')
+        pd.DataFrame().to_hdf(Path(outputs['all_cloud_object_daily_stats']), key='all_cloud_object_daily_stats')
+        Path(outputs['fig_dummy']).touch()
+        return
+
+    df_all = pd.concat(dfs, ignore_index=True)
+    df_all.to_hdf(Path(outputs['all_cloud_object_daily_stats']), key='all_cloud_object_daily_stats')
+
+    # Max/mean cloud-top height per day, one panel per reflectivity threshold.
+    threshs = sorted(df_all.reflectivity_thresh.unique())
+    fig, axes = plt.subplots(1, len(threshs), figsize=(6 * len(threshs), 5),
+                             layout='constrained', sharey=True, squeeze=False)
+    axes = axes[0]
+    for ax, thresh in zip(axes, threshs):
+        d = df_all[df_all.reflectivity_thresh == thresh].sort_values('case')
+        ax.plot(d.case, d.max_cloud_top, 'o-', label='max')
+        ax.plot(d.case, d.mean_cloud_top, 's-', label='mean')
+        ax.set_title(f'{thresh:g} dBZ')
+        ax.set_xlabel('case')
+        ax.tick_params(axis='x', rotation=90)
+        if ax is axes[0]:
+            ax.set_ylabel('cloud-top height [km]')
+        ax.legend()
+
+    figpath = Path(outputs['fig_dummy']).parent / 'cloud_top_height_per_day.png'
+    logger.info(f'saving to {figpath}')
+    plt.savefig(figpath)
+    plt.close('all')
+    Path(outputs['fig_dummy']).touch()
+
+
 @deferrable
 def gather_delta_z_stats_matrix():
     # Matrix is static (one task per case), but it depends on the brackets file from
@@ -1591,6 +1747,8 @@ rmk.add_rules([
     build_gridded_rhi_scans,
     plot_regridded_camra_kepler_l1,
     find_candidate_delta_z,
+    gather_cloud_object_stats,
+    gather_all_cloud_object_stats,
     compare_delta_z_candidates,
     gather_delta_z_stats,
     compare_rhis_to_radarnet,
