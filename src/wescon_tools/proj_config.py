@@ -47,7 +47,8 @@ def radarnet_path(case):
 
 # CASES = ['20230803', '20230815']
 CASES = [
-    '20230609',
+    # Skipping because not enough clouds to be useful.
+    # '20230609',
     '20230612',
     '20230619',
     '20230620',
