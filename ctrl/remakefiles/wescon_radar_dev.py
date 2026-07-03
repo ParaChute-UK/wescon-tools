@@ -773,21 +773,23 @@ def gather_all_cloud_object_stats(inputs, outputs):
     df_all = pd.concat(dfs, ignore_index=True)
     df_all.to_hdf(Path(outputs['all_cloud_object_daily_stats']), key='all_cloud_object_daily_stats')
 
-    # Max/mean cloud-top height per day, one panel per reflectivity threshold.
-    threshs = sorted(df_all.reflectivity_thresh.unique())
-    fig, axes = plt.subplots(1, len(threshs), figsize=(6 * len(threshs), 5),
-                             layout='constrained', sharey=True, squeeze=False)
-    axes = axes[0]
-    for ax, thresh in zip(axes, threshs):
-        d = df_all[df_all.reflectivity_thresh == thresh].sort_values('case')
-        ax.plot(d.case, d.max_cloud_top, 'o-', label='max')
-        ax.plot(d.case, d.mean_cloud_top, 's-', label='mean')
-        ax.set_title(f'{thresh:g} dBZ')
-        ax.set_xlabel('case')
-        ax.tick_params(axis='x', rotation=90)
-        if ax is axes[0]:
-            ax.set_ylabel('cloud-top height [km]')
-        ax.legend()
+    # Max/mean cloud-top height per day at the 10 dBZ (full-echo) threshold, with
+    # the per-day total cloud-object count on a secondary (right) axis.
+    d = df_all[df_all.reflectivity_thresh == 10].sort_values('case')
+    fig, ax = plt.subplots(figsize=(10, 5), layout='constrained')
+    ax.plot(d.case, d.max_cloud_top, 'o-', label='max')
+    ax.plot(d.case, d.mean_cloud_top, 's-', label='mean')
+    ax.set_title('10 dBZ')
+    ax.set_xlabel('case')
+    ax.tick_params(axis='x', rotation=90)
+    ax.set_ylabel('cloud-top height [km]')
+    ax.legend(loc='upper left')
+
+    ax2 = ax.twinx()
+    ax2.plot(d.case, d.n_cloud_objs, '-', color='grey', label='total tracked clouds')
+    ax2.set_ylabel('total tracked clouds', color='grey')
+    ax2.tick_params(axis='y', labelcolor='grey')
+    ax2.legend(loc='upper right')
 
     figpath = Path(outputs['fig_dummy']).parent / 'cloud_top_height_per_day.png'
     logger.info(f'saving to {figpath}')
@@ -1404,6 +1406,51 @@ def plot_full_corr_matrix(case, tracking_precip_thresh, dZ_stats_filters, df_ana
     plt.savefig(figpath)
 
 
+# Focused figures for the strongest single correlation (deltaZ_mean vs
+# delta_precip_along_beam). Both are produced once per settings combo
+# (tracking_precip_thresh x dZ_stats_filters) in analyse_all_match_rhis_to_storms.
+DELTAZ_PRECIP_XCOL = 'deltaZ_mean'
+DELTAZ_PRECIP_YCOL = 'delta_precip_along_beam'
+
+
+def plot_deltaZ_precip_by_stage(df_setting, setting, figdir):
+    """1x4 scatter of deltaZ_mean vs delta_precip_along_beam: all clouds, then by stage."""
+    fig, axes = plt.subplots(1, 4, figsize=(20, 5), layout='constrained', sharex=True, sharey=True)
+    groups = [('all', df_setting)] + [
+        (stage, df_setting[df_setting.stage == stage]) for stage in ['growth', 'mature', 'decay']]
+    for ax, (label, d) in zip(axes, groups):
+        ax.scatter(d[DELTAZ_PRECIP_XCOL], d[DELTAZ_PRECIP_YCOL], s=15, alpha=0.5)
+        annotate_fit_with_line(d[DELTAZ_PRECIP_XCOL], d[DELTAZ_PRECIP_YCOL], ax=ax)
+        ax.set_title(f'{label} N={len(d)}')
+        ax.set_xlabel(DELTAZ_PRECIP_XCOL)
+    axes[0].set_ylabel(DELTAZ_PRECIP_YCOL)
+    fig.suptitle(setting)
+    figpath = figdir / f'analysis_match_rhi_storm_stats.{DELTAZ_PRECIP_XCOL}.{DELTAZ_PRECIP_YCOL}.by_stage.{setting}.png'
+    logger.info(f'saving to {figpath}')
+    plt.savefig(figpath)
+    plt.close('all')
+
+
+def plot_deltaZ_precip_by_case(df_setting, setting, cases, figdir):
+    """5x4 grid of deltaZ_mean vs delta_precip_along_beam, one panel per case (extra axes cleared)."""
+    fig, axes = plt.subplots(5, 4, figsize=(20, 22), layout='constrained', sharex=True, sharey=True)
+    axes_flat = axes.flatten()
+    for ax, case in zip(axes_flat, cases):
+        d = df_setting[df_setting.case == case]
+        ax.scatter(d[DELTAZ_PRECIP_XCOL], d[DELTAZ_PRECIP_YCOL], s=15, alpha=0.5)
+        annotate_fit_with_line(d[DELTAZ_PRECIP_XCOL], d[DELTAZ_PRECIP_YCOL], ax=ax)
+        ax.set_title(f'{case} N={len(d)}')
+    for ax in axes_flat[len(cases):]:
+        ax.set_axis_off()
+    fig.suptitle(setting)
+    fig.supxlabel(DELTAZ_PRECIP_XCOL)
+    fig.supylabel(DELTAZ_PRECIP_YCOL)
+    figpath = figdir / f'analysis_match_rhi_storm_stats.{DELTAZ_PRECIP_XCOL}.{DELTAZ_PRECIP_YCOL}.by_case.{setting}.png'
+    logger.info(f'saving to {figpath}')
+    plt.savefig(figpath)
+    plt.close('all')
+
+
 def append_analysis_stats(key, df_dZ_stats, df_rhi_storm_stats, df_storms, analysis_stats):
     for i in range(0, len(df_rhi_storm_stats), 2):
         if i % 100 == 0:
@@ -1572,6 +1619,8 @@ def analyse_all_match_rhis_to_storms_outputs(simple_track_variant):
         'TRACKING_PRECIP_THRESHS': TRACKING_PRECIP_THRESHS,
         'DZ_STATS_FILTERS': DZ_STATS_FILTERS,
         'plot_full_corr_matrix': plot_full_corr_matrix,
+        'plot_deltaZ_precip_by_stage': plot_deltaZ_precip_by_stage,
+        'plot_deltaZ_precip_by_case': plot_deltaZ_precip_by_case,
         'annotate_fit_with_line': annotate_fit_with_line,
         'plot_corr_grid': plot_corr_grid,
         'CORR_PLOT_KIND': CORR_PLOT_KIND,
@@ -1661,6 +1710,14 @@ def analyse_all_match_rhis_to_storms(inputs, outputs, simple_track_variant):
     Path(outputs['fig_dummy']).touch()
     logger.info(f'saving to {figpath}')
     plt.savefig(figpath)
+
+    # Focused deltaZ_mean vs delta_precip_along_beam figures, once per settings combo:
+    # a by-stage scatter (all/growth/mature/decay) and a per-case grid.
+    for tracking_precip_thresh, dZ_stats_filters in product(TRACKING_PRECIP_THRESHS, DZ_STATS_FILTERS):
+        setting = f'{tracking_precip_thresh}_{dZ_stats_filters}'
+        df_setting = df_analysis_matches_full[df_analysis_matches_full.settings == setting]
+        plot_deltaZ_precip_by_stage(df_setting, setting, figdir)
+        plot_deltaZ_precip_by_case(df_setting, setting, conf.CASES, figdir)
 
 
 # Fixed example task for display_hdf_schemas: one case, first setting of every other axis.
