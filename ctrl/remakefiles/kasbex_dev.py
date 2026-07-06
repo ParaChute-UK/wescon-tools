@@ -317,7 +317,7 @@ def regrid_camra_kepler_l1(inputs, outputs, case, radar, batch_idx):
             rain_times = pd.DatetimeIndex(da_rain.time)
             isel_time = np.abs((rain_times - time).to_series().dt.total_seconds().values) < 300
             da_rain_either_side = da_rain.isel(time=isel_time)
-            fi = FlowInterp(da_rain_either_side[0].values, da_rain_either_side[1].values, stride=10, max_flow_speed=15)
+            fi = FlowInterp(da_rain_either_side[0].values, da_rain_either_side[1].values, stride=10, max_flow_speed=25)
             if time.minute % 5 == 0 and time.second == 0:
                 # No need to interp, BUT might not be exactly on target time
                 # because miliseconds might be != 0 - hence method='nearest'.

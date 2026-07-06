@@ -1,8 +1,9 @@
+from dataclasses import dataclass
 from pathlib import Path
 
 KASBEX_OUTPUT_VN = 'v0.1'
 # Output version for the wescon_radar_dev pipeline (used in all its output paths).
-WESCON_RADAR_DEV_OUTPUT_VN = 'v13'
+WESCON_RADAR_DEV_OUTPUT_VN = 'v14'
 
 # Radar geometry / timing constants (shared across wescon_radar_dev rules and the
 # delta_z module). Chilbolton (CAMRa) OSGB eastings/northings (m) and the RadarNet
@@ -76,3 +77,20 @@ KASBEX_CASES = [
     '20250909',
     '20250911'
 ]
+
+@dataclass
+class Settings:
+    """Science settings."""
+    # Domain to keep around Chilbolton.
+    domain_halfwidth: float = 180e3  # m
+    # Regrid settings.
+    default_regrid_dx: float = 50  # m
+    default_regrid_dz: float = 100 / 3  # m
+    default_lid: float = 12  # km
+    camra_end: float = 150  # km
+    kepler_end: float = 50  # km
+    deltaZ_time_thresh: int = 3  # minute
+    deltaZ_az_thresh: float = 5  # deg
+    # Bracket azimuth step limits used by find_brackets.
+    bracket_az_lower_limit: float = 0.1  # deg
+    bracket_az_upper_limit: float = 0.8  # deg

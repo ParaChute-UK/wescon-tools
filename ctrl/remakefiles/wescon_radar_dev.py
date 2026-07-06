@@ -24,7 +24,6 @@ brackets. No manual "run it twice" is needed.
 Contact: mark.muetzelfeldt@reading.ac.uk
 """
 from collections import namedtuple
-from dataclasses import dataclass
 from itertools import batched, product
 from pathlib import Path
 
@@ -91,25 +90,7 @@ TRACKING_PRECIP_THRESHS = [1., 3., 5.]
 DZ_STATS_FILTERS = ['all_cloud', 'high_cloud']
 
 
-@dataclass
-class Settings:
-    """Science settings."""
-    # Domain to keep around Chilbolton.
-    domain_halfwidth: float = 180e3  # km
-    # Regrid settings.
-    default_regrid_dx: float = 50  # m
-    default_regrid_dz: float = 100 / 3  # m
-    default_lid: float = 12  # km
-    camra_end: float = 150  # km
-    kepler_end: float = 50  # km
-    deltaZ_time_thresh: int = 3  # minute
-    deltaZ_az_thresh: float = 5  # deg
-    # Bracket azimuth step limits used by find_brackets.
-    bracket_az_lower_limit: float = 0.1  # deg
-    bracket_az_upper_limit: float = 0.8  # deg
-
-
-settings = Settings()
+settings = conf.Settings()
 
 # 5/6/2026: v10 compares identically to v7 for output of CompareDeltaZCandidates (most complex logic and where the
 # bulk of the refactoring was done).
@@ -236,7 +217,7 @@ def build_gridded_rhi_scans(inputs, outputs, case, radar, batch_idx):
         else:
             isel_time = np.abs((rain_times - time).to_series().dt.total_seconds().values) < RADARNET_TIMESTEP_S
         da_rain_either_side = da_rain.isel(time=isel_time)
-        fi = FlowInterp(da_rain_either_side[0].values, da_rain_either_side[1].values, stride=10, max_flow_speed=15)
+        fi = FlowInterp(da_rain_either_side[0].values, da_rain_either_side[1].values, stride=10, max_flow_speed=25)
         if time.minute % 5 == 0 and time.second == 0:
             # No need to interp, BUT might not be exactly on target time
             # because miliseconds might be != 0 - hence method='nearest'.
@@ -922,7 +903,8 @@ def calc_marshall_palmer(ds_sub, method='marshall1955', height=1):
     a, b = ab_map[method]
     dBZ = ds_sub.sel(z=height).rhi_Z.values
     Z = 10**(dBZ / 10)
-    R = (Z / a)**b
+    # Z = a * R**b  =>  R = (Z / a)**(1 / b)
+    R = (Z / a)**(1 / b)
     return R
 
 
@@ -1806,6 +1788,7 @@ rmk.add_rules([
     find_candidate_delta_z,
     gather_cloud_object_stats,
     gather_all_cloud_object_stats,
+    # In delta_z.py
     compare_delta_z_candidates,
     gather_delta_z_stats,
     compare_rhis_to_radarnet,

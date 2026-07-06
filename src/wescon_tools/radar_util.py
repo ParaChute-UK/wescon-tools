@@ -32,7 +32,7 @@ def add_cartesian_coords(ds):
     ds['r'] = np.cos(ds.elevation * np.pi / 180) * ds.rangekm
     ds['x'] = np.sin(ds.azimuth * np.pi / 180) * np.cos(ds.elevation * np.pi / 180) * ds.rangekm
     ds['y'] = np.cos(ds.azimuth * np.pi / 180) * np.cos(ds.elevation * np.pi / 180) * ds.rangekm
-    ds['z'] = ds.elevation * np.pi / 180 * ds.rangekm + np.sqrt(ds.r**2 + r_earth**2) - r_earth
+    ds['z'] = np.sin(ds.elevation * np.pi / 180) * ds.rangekm + np.sqrt(ds.r**2 + r_earth**2) - r_earth
 
 
 class RadarRegridder:

@@ -33,6 +33,8 @@ RADARNET_TIMESTEP_S = conf.RADARNET_TIMESTEP_S
 output_vn = conf.WESCON_RADAR_DEV_OUTPUT_VN
 
 
+settings = conf.Settings()
+
 @dataclass
 class CrossCorrelationResult:
     """Store the output from the cross correlation of 2 1D radar signals."""
@@ -59,13 +61,12 @@ class CompareDeltaZCandidatesSettings:
     alignment_range_max: int = 150
     # Forward/backward points to consider when calculating alignment.
     alignment_offset: int = 20
-    camra_resolution: int = 75
     # Reflectivity thresholds
     refl_thresh1: int = 10
     refl_thresh2: int = 35
     refl_thresh3: int = 55
     # Amount (gridded grid cells) to offset the subsetted fields by
-    subset_offset_pad: int = 20  # == 1.5km (20 * 75m) in x, 666.6m (20 * 33.33m) in z.
+    subset_offset_pad: int = 20  # == 1km (20 * 50m) in x, 666.6m (20 * 33.33m) in z.
     # Correlation offset threshold (max allowable)
     corr_offset_thresh: int = 20
 
@@ -242,7 +243,8 @@ def calc_parallel_perpendicular_winds(ds1_comp, ds2_comp, x_idxmin, x_idxmax):
     dts = (t2 - t1).total_seconds()
 
     az_mean = ds1_comp.rhi_mean_az.values.mean()
-    transect_dist = ds1_comp.x.values
+    az_mean_rad = az_mean * np.pi / 180
+    transect_dist = ds1_comp.x.values * 1e3  # convert km to m.
     transect_x = xr.DataArray(transect_dist * np.sin(az_mean * np.pi / 180) + CHIL_X, dims='transect')
     transect_y = xr.DataArray(transect_dist * np.cos(az_mean * np.pi / 180) + CHIL_Y, dims='transect')
 
@@ -255,15 +257,13 @@ def calc_parallel_perpendicular_winds(ds1_comp, ds2_comp, x_idxmin, x_idxmax):
     # component is 0, and the perpendicular is -10 m/s.
     # This means that for a u wind of 0, v of 10 m/s (southerly), and a beam az azimuth 0 (pointing north), the parallel
     # component is 10 m/s, and the perpendicular is 0.
-    transect_wind_parallel = transect_u * np.sin(az_mean * np.pi / 180) + transect_v * np.cos(az_mean * np.pi / 180)
-    transect_wind_perpendicular = - transect_u * np.cos(az_mean * np.pi / 180) + transect_v * np.sin(
-        az_mean * np.pi / 180)
+    transect_wind_parallel = transect_u * np.sin(az_mean_rad) + transect_v * np.cos(az_mean_rad)
+    transect_wind_perpendicular = - transect_u * np.cos(az_mean_rad) + transect_v * np.sin(az_mean_rad)
     mean_wind_parallel = transect_wind_parallel.isel(transect=slice(x_idxmin, x_idxmax)).mean().values.item()
-    mean_wind_perpendicular = transect_wind_perpendicular.isel(
-        transect=slice(x_idxmin, x_idxmax)).mean().values.item()
+    mean_wind_perpendicular = transect_wind_perpendicular.isel(transect=slice(x_idxmin, x_idxmax)).mean().values.item()
 
     # -ve because it's an offset: positive wind means ds2 cloud is farther from radar - correction shifts it back.
-    wind_parallel_offset = -mean_wind_parallel * dts / compare_settings.camra_resolution
+    wind_parallel_offset = -mean_wind_parallel * dts / settings.default_regrid_dx
 
     return wind_parallel_offset, mean_wind_parallel, mean_wind_perpendicular, transect_wind_parallel, transect_wind_perpendicular
 
@@ -288,8 +288,8 @@ def find_all_beam_alignment(ds1, ds2):
         x_idx = np.argmin(np.abs(ds1.x.values - x))
         x_idxmin = x_idx - compare_settings.alignment_offset
         x_idxmax = x_idx + compare_settings.alignment_offset
-        (est_offset, mean_wind_parallel, mean_wind_perpendicular, transect_wind_parallel,
-         transect_wind_perpendicular) = calc_parallel_perpendicular_winds(ds1_comp, ds2_comp, x_idxmin, x_idxmax)
+        (_, _, mean_wind_perpendicular, _,
+         _) = calc_parallel_perpendicular_winds(ds1_comp, ds2_comp, x_idxmin, x_idxmax)
 
         beam_centres1 = x * (ds1.rhi_mean_az.values * np.pi / 180 - ds1.rhi_mean_az.values[0] * np.pi / 180)
         # 1e3: convert from m to km.
@@ -444,6 +444,7 @@ def _build_stats_entry(ctx, objs1, objs2, w_plane_hr_10dBZ, perp_offset, case, f
         'CHIL_X': CHIL_X,
         'CHIL_Y': CHIL_Y,
         'RADARNET_TIMESTEP_S': RADARNET_TIMESTEP_S,
+        'settings': settings,
         'compare_settings': compare_settings,
         'xr_find_cloud_objects': xr_find_cloud_objects,
         'find_peaks': find_peaks,
@@ -648,7 +649,7 @@ wind angle from: {wind_angle_from:.2f}$\degree$'''
         ax.set_ylim(-150, 150)
 
     def plot_cross_corr(cc_result, offset, optimal_offset, ax):
-        ax.set_title(f'cross corr: x-offset={offset} (={offset * compare_settings.camra_resolution}m)')
+        ax.set_title(f'cross corr: x-offset={offset} (={offset * settings.default_regrid_dx}m)')
         ax.plot(cc_result.ccidx, cc_result.ccplot)
         ax.axhline(y=cc_result.percentiles['p95'], color='k', ls='-.')
         ax.axhline(y=cc_result.percentiles['p98'], color='k', ls='--')

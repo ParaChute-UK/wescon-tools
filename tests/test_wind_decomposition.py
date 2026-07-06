@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 import xarray as xr
 from delta_z import (calc_parallel_perpendicular_winds,
-                     calc_cross_correlation, compare_settings)
+                     calc_cross_correlation, settings)
 from helpers import make_uniform_flow_ds, make_gaussian_z_field
 
 WIND_SPEED = 10.0   # m/s
@@ -101,7 +101,8 @@ class TestWindParallelOffset:
         assert par > 0, 'Northward wind on north beam should be positive parallel'
         assert est_offset < 0, (
             f'Positive parallel wind should give negative offset (cloud moved away). '
-            f'Got est_offset={est_offset:.2f}. Check the sign on line 854 of wescon_radar_dev.py.'
+            f'Got est_offset={est_offset:.2f}. Check the sign of wind_parallel_offset in '
+            f'calc_parallel_perpendicular_winds (delta_z.py).'
         )
 
 
@@ -115,7 +116,7 @@ class TestEndToEndSignChain:
       - ds2.rhi_Z is ds1.rhi_Z rolled by +D_CELLS (cloud has moved away).
 
     Then verifies the full pipeline:
-      1. wind_parallel_offset is negative and equals -D_CELLS   (sign on line 854)
+      1. wind_parallel_offset is negative and equals -D_CELLS   (sign in calc_parallel_perpendicular_winds)
       2. calc_cross_correlation returns -D_CELLS as a valid offset  (consistent signs)
       3. applying int(wind_parallel_offset) as a roll to ds2 recovers ds1 at the blob
          (the correction actually works)
@@ -127,7 +128,7 @@ class TestEndToEndSignChain:
 
     def _make_composites(self):
         """Build matched ds1/ds2 composites with consistent wind and blob displacement."""
-        wind_v = self.D_CELLS * compare_settings.camra_resolution / self.DT_S  # m/s
+        wind_v = self.D_CELLS * settings.default_regrid_dx / self.DT_S  # m/s
 
         t1 = pd.Timestamp('2023-08-03 12:00:00')
         t2 = t1 + pd.Timedelta(seconds=self.DT_S)
@@ -161,7 +162,7 @@ class TestEndToEndSignChain:
         assert par > 0, f'Northward wind should give positive parallel, got {par:.3f}'
         assert est_offset < 0, (
             f'Cloud moved away from radar — correction offset must be negative. '
-            f'Got {est_offset:.2f}. Sign error on wescon_radar_dev.py line 854?'
+            f'Got {est_offset:.2f}. Sign error in calc_parallel_perpendicular_winds (delta_z.py)?'
         )
         assert abs(est_offset - (-self.D_CELLS)) < 0.1, (
             f'Expected wind_parallel_offset ≈ {-self.D_CELLS}, got {est_offset:.3f}. '
