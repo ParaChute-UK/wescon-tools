@@ -2,6 +2,8 @@ import numpy as np
 import xarray as xr
 import pytest
 
+from delta_z import calc_masked_delta_z
+
 
 class TestDeltaZFormula:
     """
@@ -41,28 +43,75 @@ class TestDeltaZFormula:
         # After roll ds2's blob is at x=5, same as ds1 — deltaZ should be zero there
         assert deltaZ[0, 5] == pytest.approx(0.0)
 
-    def test_mask_applied_to_unrolled_ds1(self):
-        """
-        Document current masking behaviour: the >20 dBZ mask uses the UNROLLED ds1.
-        After a non-zero roll this means deltaZ_20dBZ samples different atmospheric
-        columns in ds1 vs ds2. This test pins the current behaviour so that any
-        intentional change to use the rolled grid is visible (see issue L3).
-        """
-        nx, nz = 10, 3
-        ds1 = np.zeros((nz, nx))
-        ds2 = np.zeros((nz, nx))
-        ds1[:, 5] = 25.0  # above 20 dBZ threshold at x=5
-        ds2[:, 6] = 25.0  # blob shifted right in ds2
+class TestMaskedDeltaZ:
+    """
+    Pin the calc_masked_delta_z conventions:
+      * threshold on the two-time mean (Z1 + rolled Z2) / 2 > 20 — symmetric, so growth and
+        decay pixels are treated alike and one-sided selection bias cancels in the difference.
+      * mask restricted to the matched cloud pair via the label fields (labels2 rolled like Z2).
+      * pixels lacking coverage (NaN) in either aligned field are excluded.
+    """
 
-        offset = 1
-        deltaZ = np.roll(ds2, offset, axis=1) - ds1
-        # Current code: mask = ds1.rhi_Z > 20 (unrolled)
-        mask = ds1 > 20
-        deltaZ_20 = deltaZ[mask]
-        # Masked cells come from x=5 in ds1, x=5 in rolled ds2
-        # (which originated from x=4 in unrolled ds2, value=0).
-        # So deltaZ at x=5 = 0 - 25 = -25.
-        assert deltaZ_20[0] == pytest.approx(-25.0), (
-            'If this fails, the masking convention has changed. '
-            'Update this test and issue L3 in the code review.'
-        )
+    NZ, NX = 3, 10
+
+    def _zeros(self):
+        return np.zeros((self.NZ, self.NX)), np.zeros((self.NZ, self.NX))
+
+    def _labels_everywhere(self, label=1):
+        return np.full((self.NZ, self.NX), label, dtype=int)
+
+    def test_growth_and_decay_included_symmetrically(self):
+        Z1, Z2 = self._zeros()
+        Z1[:, 3], Z2[:, 3] = 10.0, 35.0   # growth: two-time mean 22.5 > 20 -> in
+        Z1[:, 6], Z2[:, 6] = 35.0, 10.0   # decay: mean 22.5 -> in
+        Z1[:, 8], Z2[:, 8] = 15.0, 15.0   # weak: mean 15 -> out
+        labels = self._labels_everywhere()
+        deltaZ, mask = calc_masked_delta_z(Z1, Z2, 0, labels, labels, 1, 1)
+        assert mask[:, 3].all() and mask[:, 6].all()
+        assert not mask[:, 8].any()
+        assert deltaZ[0, 3] == pytest.approx(25.0)
+        assert deltaZ[0, 6] == pytest.approx(-25.0)
+
+    def test_mask_uses_rolled_ds2_not_unrolled_ds1(self):
+        """The scenario that pinned the OLD one-sided convention: a ds1-only blob no longer
+        passes the mask on its own (mean 12.5 < 20), and neither does the displaced ds2 blob."""
+        Z1, Z2 = self._zeros()
+        Z1[:, 5] = 25.0
+        Z2[:, 6] = 25.0  # after roll by +1 this lands at x=7, not on ds1's blob
+        labels = self._labels_everywhere()
+        _, mask = calc_masked_delta_z(Z1, Z2, 1, labels, labels, 1, 1)
+        assert not mask.any(), 'One-sided exceedances must not pass the two-time mean mask'
+
+    def test_mask_restricted_to_matched_cloud_pair(self):
+        Z1, Z2 = self._zeros()
+        Z1[:, 2], Z2[:, 2] = 30.0, 30.0   # cloud 1 (the matched pair)
+        Z1[:, 7], Z2[:, 7] = 30.0, 30.0   # cloud 2 (a different object in the window)
+        labels1 = np.zeros((self.NZ, self.NX), dtype=int)
+        labels1[:, 2] = 1
+        labels1[:, 7] = 2
+        labels2 = labels1.copy()
+        _, mask = calc_masked_delta_z(Z1, Z2, 0, labels1, labels2, 1, 1)
+        assert mask[:, 2].all()
+        assert not mask[:, 7].any(), 'Pixels of unmatched clouds must be excluded'
+
+    def test_labels2_rolled_with_offset(self):
+        """A pixel only in cloud cl2 must be located via the ROLLED labels2."""
+        Z1, Z2 = self._zeros()
+        Z1[:, 5] = 25.0
+        Z2[:, 6] = 25.0  # rolled by -1 -> x=5, aligned with ds1's blob
+        labels1 = np.zeros((self.NZ, self.NX), dtype=int)  # no cl1 anywhere
+        labels2 = np.zeros((self.NZ, self.NX), dtype=int)
+        labels2[:, 6] = 2  # cl2 at ds2's (unrolled) blob position
+        _, mask = calc_masked_delta_z(Z1, Z2, -1, labels1, labels2, 1, 2)
+        assert mask[:, 5].all(), 'cl2 membership must follow the rolled frame'
+        assert mask.sum() == self.NZ
+
+    def test_nan_coverage_excluded(self):
+        Z1, Z2 = self._zeros()
+        Z1[:, 4], Z2[:, 4] = 30.0, 30.0
+        Z2[0, 4] = np.nan  # no coverage in one scan at one pixel
+        labels = self._labels_everywhere()
+        deltaZ, mask = calc_masked_delta_z(Z1, Z2, 0, labels, labels, 1, 1)
+        assert not mask[0, 4]
+        assert mask[1:, 4].all()
+        assert not np.isnan(deltaZ[mask]).any(), 'Masked deltaZ must be NaN-free'

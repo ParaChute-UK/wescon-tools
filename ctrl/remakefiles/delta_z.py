@@ -401,6 +401,26 @@ def calc_cross_correlation(daZ1, daZ2):
         valid_parallel_offsets=ccidx[np.intersect1d(peaks_above_ptile, peaks_not_too_far)])
     return cc_result
 
+def calc_masked_delta_z(Z1, Z2, offset, labels1_sub, labels2_sub, cl1, cl2, thresh=20):
+    """Calculate the aligned deltaZ field and the conditional-stats mask for one cloud pair.
+
+    Z2 and labels2_sub are rolled by offset (x-dir only) into Z1's frame. The mask:
+    * thresholds on the two-time mean, (Z1 + Z2_rolled) / 2 > thresh. This is symmetric in the
+      two fields, so selection noise cancels in the difference (no regression-to-the-mean bias
+      from conditioning on one field) and growth/decay pixels are treated alike.
+    * is restricted to the matched cloud pair (cl1/cl2 in the label fields), not every
+      >thresh pixel in the window.
+    * excludes pixels without coverage in both scans (explicit NaN censoring, so the stats
+      never depend on nanmean semantics).
+    """
+    Z2_rolled = np.roll(Z2, int(offset), axis=1)
+    deltaZ = Z2_rolled - Z1
+    in_clouds = (labels1_sub == cl1) | (np.roll(labels2_sub, int(offset), axis=1) == cl2)
+    covered = ~np.isnan(Z1) & ~np.isnan(Z2_rolled)
+    mask = ((Z1 + Z2_rolled) / 2 > thresh) & in_clouds & covered
+    return deltaZ, mask
+
+
 def get_obj_field(objs, cl, field):
     obj_cloud_idx = np.where(objs.isel(time=0).cloud_label.values == cl)[0].item()
     return objs.isel(time=0).sel(reflectivity_thresh=10)[field].values[obj_cloud_idx]
@@ -408,8 +428,12 @@ def get_obj_field(objs, cl, field):
 
 def _build_stats_entry(ctx, objs1, objs2, w_plane_hr_10dBZ, perp_offset, case, figname):
     """Assemble the scalar statistics dict for one (cloud pair, parallel offset) combination."""
-    deltaZ = np.roll(ctx.ds2_sub.rhi_Z.values, int(ctx.offset), axis=1) - ctx.ds1_sub.rhi_Z.values
-    deltaZ_20dBZ = deltaZ[ctx.ds1_sub.rhi_Z > 20]
+    # Same slicing as ds1_sub/ds2_sub in subset_fields (labels are full-composite arrays).
+    labels1_sub = ctx.labels1[:ctx.z_idxmax, ctx.x_idxmin:ctx.x_idxmax]
+    labels2_sub = ctx.labels2[:ctx.z_idxmax, ctx.x_idxmin:ctx.x_idxmax]
+    deltaZ, mask_20dBZ = calc_masked_delta_z(ctx.ds1_sub.rhi_Z.values, ctx.ds2_sub.rhi_Z.values,
+                                             ctx.offset, labels1_sub, labels2_sub, ctx.cl1, ctx.cl2)
+    deltaZ_20dBZ = deltaZ[mask_20dBZ]
     return {
         'case': case,
         'bracket_idx1': ctx.bracket_idx1, 'bracket_idx2': ctx.bracket_idx2,
@@ -426,9 +450,12 @@ def _build_stats_entry(ctx, objs1, objs2, w_plane_hr_10dBZ, perp_offset, case, f
         'deltaZ_mean': np.nanmean(deltaZ),
         'deltaZ_absmean': np.nanmean(np.abs(deltaZ)),
         'deltaZ_posmean': np.nanmean(deltaZ[deltaZ > 0]),
-        'deltaZ_mean_20dBZ': np.nanmean(deltaZ_20dBZ),
-        'deltaZ_absmean_20dBZ': np.nanmean(np.abs(deltaZ_20dBZ)),
-        'deltaZ_posmean_20dBZ': np.nanmean(deltaZ_20dBZ[deltaZ_20dBZ > 0]),
+        # deltaZ_20dBZ is NaN-free by construction (coverage is part of the mask).
+        'n_pixels_20dBZ': int(mask_20dBZ.sum()),
+        'deltaZ_mean_20dBZ': deltaZ_20dBZ.mean() if len(deltaZ_20dBZ) else np.nan,
+        'deltaZ_absmean_20dBZ': np.abs(deltaZ_20dBZ).mean() if len(deltaZ_20dBZ) else np.nan,
+        'deltaZ_posmean_20dBZ': (deltaZ_20dBZ[deltaZ_20dBZ > 0].mean()
+                                 if (deltaZ_20dBZ > 0).any() else np.nan),
         '3d_wind_max_w': np.nanmax(w_plane_hr_10dBZ),
         '3d_wind_mean_w': np.nanmean(w_plane_hr_10dBZ),
         'figname': str(figname),
@@ -465,6 +492,7 @@ def _build_stats_entry(ctx, objs1, objs2, w_plane_hr_10dBZ, perp_offset, case, f
         'find_overlapping_cloud_matches': find_overlapping_cloud_matches,
         'subset_fields': subset_fields,
         'calc_cross_correlation': calc_cross_correlation,
+        'calc_masked_delta_z': calc_masked_delta_z,
         'get_obj_field': get_obj_field,
         '_build_stats_entry': _build_stats_entry,
     },
