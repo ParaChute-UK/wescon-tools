@@ -1597,6 +1597,8 @@ def analyse_all_match_rhis_to_storms_outputs(simple_track_variant):
         'plot_full_corr_matrix': plot_full_corr_matrix,
         'plot_vars_by_stage': plot_vars_by_stage,
         'plot_vars_by_case': plot_vars_by_case,
+        'DELTAZ_PRECIP_XCOL': DELTAZ_PRECIP_XCOL,
+        'DELTAZ_PRECIP_YCOL': DELTAZ_PRECIP_YCOL,
         'annotate_fit_with_line': annotate_fit_with_line,
         'plot_corr_grid': plot_corr_grid,
         'CORR_PLOT_KIND': CORR_PLOT_KIND,
