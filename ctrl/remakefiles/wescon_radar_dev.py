@@ -1413,9 +1413,14 @@ def plot_vars_by_stage(df_setting, setting, figdir, xcol, ycol, xlim=None, ylim=
     plt.close('all')
 
 
-def plot_vars_by_case(df_setting, setting, cases, figdir, xcol, ycol):
-    """5x4 grid of ycol vs xcol, one panel per case (extra axes cleared)."""
-    fig, axes = plt.subplots(5, 4, figsize=(20, 22), layout='constrained', sharex=True, sharey=True)
+def plot_vars_by_case(df_setting, setting, cases, figdir, xcol, ycol, nrows=5, ncols=4,
+                      xlim=None, ylim=None, xunits='', yunits='', tag=''):
+    """nrows x ncols grid of ycol vs xcol, one panel per case (extra axes cleared).
+
+    tag distinguishes output filenames when plotting different case subsets."""
+    assert nrows * ncols >= len(cases), f'{nrows}x{ncols} grid too small for {len(cases)} cases'
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4.4 * nrows), layout='constrained',
+                             sharex=True, sharey=True)
     axes_flat = axes.flatten()
     for ax, case in zip(axes_flat, cases):
         d = df_setting[df_setting.case == case]
@@ -1424,10 +1429,16 @@ def plot_vars_by_case(df_setting, setting, cases, figdir, xcol, ycol):
         ax.set_title(f'{case} N={len(d)}')
     for ax in axes_flat[len(cases):]:
         ax.set_axis_off()
+    # sharex/sharey: setting on one axis sets all.
+    if xlim is not None:
+        axes_flat[0].set_xlim(xlim)
+    if ylim is not None:
+        axes_flat[0].set_ylim(ylim)
     fig.suptitle(setting)
-    fig.supxlabel(xcol)
-    fig.supylabel(ycol)
-    figpath = figdir / f'analysis_match_rhi_storm_stats.{xcol}.{ycol}.by_case.{setting}.png'
+    fig.supxlabel(f'{xcol} [{xunits}]' if xunits else xcol)
+    fig.supylabel(f'{ycol} [{yunits}]' if yunits else ycol)
+    tag_str = f'.{tag}' if tag else ''
+    figpath = figdir / f'analysis_match_rhi_storm_stats.{xcol}.{ycol}.by_case{tag_str}.{setting}.png'
     logger.info(f'saving to {figpath}')
     plt.savefig(figpath)
     plt.close('all')
@@ -1704,6 +1715,11 @@ def analyse_all_match_rhis_to_storms(inputs, outputs, simple_track_variant):
         plot_vars_by_stage(df_setting, setting, figdir, DELTAZ_PRECIP_XCOL, DELTAZ_PRECIP_YCOL,
                            xlim=(-10, 10), ylim=(-0.15, 0.15), xunits='dBZ', yunits='mm h$^{-1}$ s$^{-1}$')
         plot_vars_by_case(df_setting, setting, conf.CASES, figdir, DELTAZ_PRECIP_XCOL, DELTAZ_PRECIP_YCOL)
+        # Focused 2x2 for the four strongest cases.
+        plot_vars_by_case(df_setting, setting, ['20230802', '20230818', '20230824', '20230825'], figdir,
+                          DELTAZ_PRECIP_XCOL, DELTAZ_PRECIP_YCOL, nrows=2, ncols=2,
+                          xlim=(-10, 10), ylim=(-0.15, 0.15),
+                          xunits='dBZ', yunits='mm h$^{-1}$ s$^{-1}$', tag='selected')
 
 
 # Fixed example task for display_hdf_schemas: one case, first setting of every other axis.
