@@ -1386,7 +1386,7 @@ DELTAZ_PRECIP_XCOL = 'deltaZ_mean'
 DELTAZ_PRECIP_YCOL = 'delta_precip_along_beam'
 
 
-def plot_vars_by_stage(df_setting, setting, figdir, xcol, ycol):
+def plot_vars_by_stage(df_setting, setting, figdir, xcol, ycol, xlim=None, ylim=None, xunits='', yunits=''):
     """2x2 scatter of ycol vs xcol: all clouds, then by stage (growth/mature/decay)."""
     fig, axes = plt.subplots(2, 2, figsize=(10, 10), layout='constrained', sharex=True, sharey=True)
     groups = [('all', df_setting)] + [
@@ -1395,10 +1395,17 @@ def plot_vars_by_stage(df_setting, setting, figdir, xcol, ycol):
         ax.scatter(d[xcol], d[ycol], s=15, alpha=0.5)
         annotate_fit_with_line(d[xcol], d[ycol], ax=ax)
         ax.set_title(f'{label} N={len(d)}')
+    xlabel = f'{xcol} [{xunits}]' if xunits else xcol
+    ylabel = f'{ycol} [{yunits}]' if yunits else ycol
     for ax in axes[-1, :]:
-        ax.set_xlabel(xcol)
+        ax.set_xlabel(xlabel)
     for ax in axes[:, 0]:
-        ax.set_ylabel(ycol)
+        ax.set_ylabel(ylabel)
+    # sharex/sharey: setting on one axis sets all.
+    if xlim is not None:
+        axes[0, 0].set_xlim(xlim)
+    if ylim is not None:
+        axes[0, 0].set_ylim(ylim)
     fig.suptitle(setting)
     figpath = figdir / f'analysis_match_rhi_storm_stats.{xcol}.{ycol}.by_stage.{setting}.png'
     logger.info(f'saving to {figpath}')
@@ -1694,7 +1701,8 @@ def analyse_all_match_rhis_to_storms(inputs, outputs, simple_track_variant):
     for tracking_precip_thresh, dZ_stats_filters in product(TRACKING_PRECIP_THRESHS, DZ_STATS_FILTERS):
         setting = f'{tracking_precip_thresh}_{dZ_stats_filters}'
         df_setting = df_analysis_matches_full[df_analysis_matches_full.settings == setting]
-        plot_vars_by_stage(df_setting, setting, figdir, DELTAZ_PRECIP_XCOL, DELTAZ_PRECIP_YCOL)
+        plot_vars_by_stage(df_setting, setting, figdir, DELTAZ_PRECIP_XCOL, DELTAZ_PRECIP_YCOL,
+                           xlim=(-10, 10), ylim=(-0.15, 0.15), xunits='dBZ', yunits='mm h$^{-1}$ s$^{-1}$')
         plot_vars_by_case(df_setting, setting, conf.CASES, figdir, DELTAZ_PRECIP_XCOL, DELTAZ_PRECIP_YCOL)
 
 
