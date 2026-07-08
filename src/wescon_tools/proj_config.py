@@ -3,6 +3,17 @@ from pathlib import Path
 
 KASBEX_OUTPUT_VN = 'v0.1'
 # Output version for the wescon_radar_dev pipeline (used in all its output paths).
+# 5/6/2026: v10 compares identically to v7 for output of CompareDeltaZCandidates (most complex logic and where the
+# bulk of the refactoring was done).
+# Likewise, v10 is identical to v7 for the rhi_storm_match plots. These are essentially an end-to-end test of the whole
+# pipeline, meaning I've got extremely high confidence that the changes did not change anything.
+# v7: version run earlier in 2026 using the MCS:PRIME GWS.
+# v8: version in which I just got everything running again against the new dirs.
+# v10: version in I refactored some code and split up some functions.
+# v11: bugfixes for edge cases found when running against all IOPs (empty dfs).
+# v12: try to get things running. Messed up dirs so that figs ended up in data dirs.
+# v13: was going to be the release version but contained some serious bugs (thanks claude). Perhaps it was unluck?
+# v14: current release.
 WESCON_RADAR_DEV_OUTPUT_VN = 'v14'
 
 # Radar geometry / timing constants (shared across wescon_radar_dev rules and the

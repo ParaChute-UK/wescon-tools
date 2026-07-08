@@ -91,16 +91,6 @@ DZ_STATS_FILTERS = ['all_cloud', 'high_cloud']
 
 
 settings = conf.Settings()
-
-# 5/6/2026: v10 compares identically to v7 for output of CompareDeltaZCandidates (most complex logic and where the
-# bulk of the refactoring was done).
-# Likewise, v10 is identical to v7 for the rhi_storm_match plots. These are essentially an end-to-end test of the whole
-# pipeline, meaning I've got extremely high confidence that the changes did not change anything.
-# v7: version run earlier in 2026 using the MCS:PRIME GWS.
-# v8: version in which I just got everything running again against the new dirs.
-# v10: version in I refactored some code and split up some functions.
-# v11: bugfixes for edge cases found when running against all IOPs (empty dfs).
-# v12: try to get things running. Messed up dirs so that figs ended up in data dirs.
 output_vn = conf.WESCON_RADAR_DEV_OUTPUT_VN
 
 slurm_config = {'account': 'afesp', 'partition': 'standard', 'qos': 'standard', 'mem': 100000, 'exclude': 'host1117'}
