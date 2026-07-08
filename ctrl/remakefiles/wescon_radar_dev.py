@@ -1386,39 +1386,41 @@ DELTAZ_PRECIP_XCOL = 'deltaZ_mean'
 DELTAZ_PRECIP_YCOL = 'delta_precip_along_beam'
 
 
-def plot_deltaZ_precip_by_stage(df_setting, setting, figdir):
-    """1x4 scatter of deltaZ_mean vs delta_precip_along_beam: all clouds, then by stage."""
-    fig, axes = plt.subplots(1, 4, figsize=(20, 5), layout='constrained', sharex=True, sharey=True)
+def plot_vars_by_stage(df_setting, setting, figdir, xcol, ycol):
+    """2x2 scatter of ycol vs xcol: all clouds, then by stage (growth/mature/decay)."""
+    fig, axes = plt.subplots(2, 2, figsize=(10, 10), layout='constrained', sharex=True, sharey=True)
     groups = [('all', df_setting)] + [
         (stage, df_setting[df_setting.stage == stage]) for stage in ['growth', 'mature', 'decay']]
-    for ax, (label, d) in zip(axes, groups):
-        ax.scatter(d[DELTAZ_PRECIP_XCOL], d[DELTAZ_PRECIP_YCOL], s=15, alpha=0.5)
-        annotate_fit_with_line(d[DELTAZ_PRECIP_XCOL], d[DELTAZ_PRECIP_YCOL], ax=ax)
+    for ax, (label, d) in zip(axes.flatten(), groups):
+        ax.scatter(d[xcol], d[ycol], s=15, alpha=0.5)
+        annotate_fit_with_line(d[xcol], d[ycol], ax=ax)
         ax.set_title(f'{label} N={len(d)}')
-        ax.set_xlabel(DELTAZ_PRECIP_XCOL)
-    axes[0].set_ylabel(DELTAZ_PRECIP_YCOL)
+    for ax in axes[-1, :]:
+        ax.set_xlabel(xcol)
+    for ax in axes[:, 0]:
+        ax.set_ylabel(ycol)
     fig.suptitle(setting)
-    figpath = figdir / f'analysis_match_rhi_storm_stats.{DELTAZ_PRECIP_XCOL}.{DELTAZ_PRECIP_YCOL}.by_stage.{setting}.png'
+    figpath = figdir / f'analysis_match_rhi_storm_stats.{xcol}.{ycol}.by_stage.{setting}.png'
     logger.info(f'saving to {figpath}')
     plt.savefig(figpath)
     plt.close('all')
 
 
-def plot_deltaZ_precip_by_case(df_setting, setting, cases, figdir):
-    """5x4 grid of deltaZ_mean vs delta_precip_along_beam, one panel per case (extra axes cleared)."""
+def plot_vars_by_case(df_setting, setting, cases, figdir, xcol, ycol):
+    """5x4 grid of ycol vs xcol, one panel per case (extra axes cleared)."""
     fig, axes = plt.subplots(5, 4, figsize=(20, 22), layout='constrained', sharex=True, sharey=True)
     axes_flat = axes.flatten()
     for ax, case in zip(axes_flat, cases):
         d = df_setting[df_setting.case == case]
-        ax.scatter(d[DELTAZ_PRECIP_XCOL], d[DELTAZ_PRECIP_YCOL], s=15, alpha=0.5)
-        annotate_fit_with_line(d[DELTAZ_PRECIP_XCOL], d[DELTAZ_PRECIP_YCOL], ax=ax)
+        ax.scatter(d[xcol], d[ycol], s=15, alpha=0.5)
+        annotate_fit_with_line(d[xcol], d[ycol], ax=ax)
         ax.set_title(f'{case} N={len(d)}')
     for ax in axes_flat[len(cases):]:
         ax.set_axis_off()
     fig.suptitle(setting)
-    fig.supxlabel(DELTAZ_PRECIP_XCOL)
-    fig.supylabel(DELTAZ_PRECIP_YCOL)
-    figpath = figdir / f'analysis_match_rhi_storm_stats.{DELTAZ_PRECIP_XCOL}.{DELTAZ_PRECIP_YCOL}.by_case.{setting}.png'
+    fig.supxlabel(xcol)
+    fig.supylabel(ycol)
+    figpath = figdir / f'analysis_match_rhi_storm_stats.{xcol}.{ycol}.by_case.{setting}.png'
     logger.info(f'saving to {figpath}')
     plt.savefig(figpath)
     plt.close('all')
@@ -1593,8 +1595,8 @@ def analyse_all_match_rhis_to_storms_outputs(simple_track_variant):
         'TRACKING_PRECIP_THRESHS': TRACKING_PRECIP_THRESHS,
         'DZ_STATS_FILTERS': DZ_STATS_FILTERS,
         'plot_full_corr_matrix': plot_full_corr_matrix,
-        'plot_deltaZ_precip_by_stage': plot_deltaZ_precip_by_stage,
-        'plot_deltaZ_precip_by_case': plot_deltaZ_precip_by_case,
+        'plot_vars_by_stage': plot_vars_by_stage,
+        'plot_vars_by_case': plot_vars_by_case,
         'annotate_fit_with_line': annotate_fit_with_line,
         'plot_corr_grid': plot_corr_grid,
         'CORR_PLOT_KIND': CORR_PLOT_KIND,
@@ -1690,8 +1692,8 @@ def analyse_all_match_rhis_to_storms(inputs, outputs, simple_track_variant):
     for tracking_precip_thresh, dZ_stats_filters in product(TRACKING_PRECIP_THRESHS, DZ_STATS_FILTERS):
         setting = f'{tracking_precip_thresh}_{dZ_stats_filters}'
         df_setting = df_analysis_matches_full[df_analysis_matches_full.settings == setting]
-        plot_deltaZ_precip_by_stage(df_setting, setting, figdir)
-        plot_deltaZ_precip_by_case(df_setting, setting, conf.CASES, figdir)
+        plot_vars_by_stage(df_setting, setting, figdir, DELTAZ_PRECIP_XCOL, DELTAZ_PRECIP_YCOL)
+        plot_vars_by_case(df_setting, setting, conf.CASES, figdir, DELTAZ_PRECIP_XCOL, DELTAZ_PRECIP_YCOL)
 
 
 # Fixed example task for display_hdf_schemas: one case, first setting of every other axis.
