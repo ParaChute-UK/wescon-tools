@@ -23,6 +23,7 @@ brackets. No manual "run it twice" is needed.
 
 Contact: mark.muetzelfeldt@reading.ac.uk
 """
+import string
 from collections import namedtuple
 from itertools import batched, product
 from pathlib import Path
@@ -1157,7 +1158,13 @@ def annotate_fit_with_line(x, y, **kws):
         line_width = 1.5 if is_interesting else 0
 
         # 5. Annotate text
-        msg = f'$r^2$={r ** 2:.2f}\n$p$={p:.2g}'
+        if p < 1e-6:
+            p_str = r'$p \ll 0.001$'
+        elif p < 1e-3:
+            p_str = '$p < 0.001$'
+        else:
+            p_str = f'$p$={p:.2g}'
+        msg = f'slope={slope:.3g}\n$r^2$={r ** 2:.2f}\n{p_str}'
         ax.text(0.05, 0.9, msg, transform=ax.transAxes,
                 fontsize=10, verticalalignment='top',
                 bbox=dict(boxstyle="round,pad=0.3", fc=face_colour, ec=edge_colour, lw=line_width, alpha=0.5))
@@ -1387,13 +1394,17 @@ DELTAZ_PRECIP_YCOL = 'delta_precip_along_beam'
 
 
 def plot_vars_by_stage(df_setting, setting, figdir, xcol, ycol, xlim=None, ylim=None, xunits='', yunits=''):
-    """2x2 scatter of ycol vs xcol: all clouds, then by stage (growth/mature/decay)."""
-    fig, axes = plt.subplots(2, 2, figsize=(10, 10), layout='constrained', sharex=True, sharey=True)
+    """2x2 scatter of ycol vs xcol: all clouds, then by stage (growth/mature/decay).
+
+    Kept small (7x7 in) so text reads large when scaled to a fixed poster panel size."""
+    fig, axes = plt.subplots(2, 2, figsize=(7, 7), layout='constrained', sharex=True, sharey=True)
     groups = [('all', df_setting)] + [
         (stage, df_setting[df_setting.stage == stage]) for stage in ['growth', 'mature', 'decay']]
-    for ax, (label, d) in zip(axes.flatten(), groups):
+    for i, (ax, (label, d)) in enumerate(zip(axes.flatten(), groups)):
+        c = string.ascii_lowercase[i]
         ax.scatter(d[xcol], d[ycol], s=15, alpha=0.5)
         annotate_fit_with_line(d[xcol], d[ycol], ax=ax)
+        ax.set_title(f'({c})', loc='left')
         ax.set_title(f'{label} N={len(d)}')
     xlabel = f'{xcol} [{xunits}]' if xunits else xcol
     ylabel = f'{ycol} [{yunits}]' if yunits else ycol
@@ -1414,18 +1425,24 @@ def plot_vars_by_stage(df_setting, setting, figdir, xcol, ycol, xlim=None, ylim=
 
 
 def plot_vars_by_case(df_setting, setting, cases, figdir, xcol, ycol, nrows=5, ncols=4,
-                      xlim=None, ylim=None, xunits='', yunits='', tag=''):
+                      xlim=None, ylim=None, xunits='', yunits='', tag='',
+                      panel_size=(5, 4.4), panel_labels=False):
     """nrows x ncols grid of ycol vs xcol, one panel per case (extra axes cleared).
 
-    tag distinguishes output filenames when plotting different case subsets."""
+    tag distinguishes output filenames when plotting different case subsets.
+    panel_labels adds (a), (b), ... over each panel's top left (left-to-right, then top-to-bottom);
+    the case/N title stays centred."""
     assert nrows * ncols >= len(cases), f'{nrows}x{ncols} grid too small for {len(cases)} cases'
-    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4.4 * nrows), layout='constrained',
-                             sharex=True, sharey=True)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(panel_size[0] * ncols, panel_size[1] * nrows),
+                             layout='constrained', sharex=True, sharey=True)
     axes_flat = axes.flatten()
-    for ax, case in zip(axes_flat, cases):
+    for i, (ax, case) in enumerate(zip(axes_flat, cases)):
         d = df_setting[df_setting.case == case]
         ax.scatter(d[xcol], d[ycol], s=15, alpha=0.5)
         annotate_fit_with_line(d[xcol], d[ycol], ax=ax)
+        if panel_labels:
+            c = string.ascii_lowercase[i]
+            ax.set_title(f'({c})', loc='left')
         ax.set_title(f'{case} N={len(d)}')
     for ax in axes_flat[len(cases):]:
         ax.set_axis_off()
@@ -1718,8 +1735,9 @@ def analyse_all_match_rhis_to_storms(inputs, outputs, simple_track_variant):
         # Focused 2x2 for the four strongest cases.
         plot_vars_by_case(df_setting, setting, ['20230802', '20230818', '20230824', '20230825'], figdir,
                           DELTAZ_PRECIP_XCOL, DELTAZ_PRECIP_YCOL, nrows=2, ncols=2,
-                          xlim=(-10, 10), ylim=(-0.15, 0.15),
-                          xunits='dBZ', yunits='mm h$^{-1}$ s$^{-1}$', tag='selected')
+                          xlim=(-5, 5), ylim=(-0.05, 0.05),
+                          xunits='dBZ', yunits='mm h$^{-1}$ s$^{-1}$', tag='selected',
+                          panel_size=(3.5, 3.5), panel_labels=True)
 
 
 # Fixed example task for display_hdf_schemas: one case, first setting of every other axis.
