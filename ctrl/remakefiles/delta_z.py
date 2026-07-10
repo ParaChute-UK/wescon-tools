@@ -468,6 +468,7 @@ def _build_stats_entry(ctx, objs1, objs2, w_plane_hr_10dBZ, perp_offset, case, f
     matrix=compare_delta_z_matrix,
     depends_on=['find_candidate_delta_z'],
     uses={
+        'output_vn': output_vn,
         'CHIL_X': CHIL_X,
         'CHIL_Y': CHIL_Y,
         'RADARNET_TIMESTEP_S': RADARNET_TIMESTEP_S,

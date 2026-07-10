@@ -156,6 +156,7 @@ def regrid_outputs(case, radar, batch_idx):
     outputs=regrid_outputs,
     matrix=regrid_matrix,
     uses={
+        'output_vn': output_vn,
         'CHIL_X': CHIL_X,
         'CHIL_Y': CHIL_Y,
         'settings': settings,
@@ -359,7 +360,7 @@ def plot_regridded_outputs(case, radar, batch_idx):
     outputs=plot_regridded_outputs,
     matrix=build_gridded_rhi_scans.matrix,
     depends_on=[build_gridded_rhi_scans],
-    uses={'plot_radarnet_rhi_transect': plot_radarnet_rhi_transect},
+    uses={'output_vn': output_vn, 'plot_radarnet_rhi_transect': plot_radarnet_rhi_transect},
 )
 def plot_regridded_camra_kepler_l1(inputs, outputs, case, radar, batch_idx):
     """Plot the regridded data."""
@@ -391,6 +392,7 @@ def find_camra_kepler_match_outputs(case):
     outputs=find_camra_kepler_match_outputs,
     matrix={'case': conf.CASES},
     uses={
+        'output_vn': output_vn,
         'CHIL_X': CHIL_X,
         'CHIL_Y': CHIL_Y,
         'LYN_X': LYN_X,
@@ -456,6 +458,7 @@ def plot_camra_kepler_match_outputs(case):
     matrix={'case': conf.CASES},
     depends_on=[find_camra_kepler_match],
     uses={
+        'output_vn': output_vn,
         'CHIL_X': CHIL_X,
         'CHIL_Y': CHIL_Y,
         'LYN_X': LYN_X,
@@ -575,7 +578,7 @@ def find_candidate_delta_z_inputs(case):
     outputs=find_candidate_delta_z_outputs,
     matrix={'case': conf.CASES},
     depends_on=[build_gridded_rhi_scans],
-    uses={'settings': settings, 'find_brackets': find_brackets},
+    uses={'output_vn': output_vn, 'settings': settings, 'find_brackets': find_brackets},
 )
 def find_candidate_delta_z(inputs, outputs, case):
     from loguru import logger
@@ -645,7 +648,7 @@ def gather_cloud_object_stats_outputs(case):
     outputs=gather_cloud_object_stats_outputs,
     matrix={'case': conf.CASES},
     depends_on=[build_gridded_rhi_scans],
-    uses={'CLOUD_OBJ_VARS': CLOUD_OBJ_VARS},
+    uses={'output_vn': output_vn, 'CLOUD_OBJ_VARS': CLOUD_OBJ_VARS},
 )
 def gather_cloud_object_stats(inputs, outputs, case):
     """Gather per-scan cloud objects into a tidy per-day table + per-day summary stats.
@@ -724,6 +727,7 @@ def gather_all_cloud_object_stats_outputs():
     inputs=gather_all_cloud_object_stats_inputs,
     outputs=gather_all_cloud_object_stats_outputs,
     depends_on=[gather_cloud_object_stats],
+    uses={'output_vn': output_vn},
 )
 def gather_all_cloud_object_stats(inputs, outputs):
     """Concat per-day cloud-object stats across all cases + a cloud-top-per-day plot."""
@@ -804,6 +808,7 @@ def gather_delta_z_stats_outputs(case):
     outputs=gather_delta_z_stats_outputs,
     matrix=gather_delta_z_stats_matrix,
     depends_on=[compare_delta_z_candidates],
+    uses={'output_vn': output_vn},
 )
 def gather_delta_z_stats(inputs, outputs, case):
     from loguru import logger
@@ -961,6 +966,7 @@ def compare_rhis_to_radarnet_outputs(case):
     # 'dZ_stats_filters': ['all_cloud', 'high_cloud'],
     depends_on=[gather_delta_z_stats],
     uses={
+        'output_vn': output_vn,
         'CHIL_X': CHIL_X,
         'CHIL_Y': CHIL_Y,
         'FileLoader': FileLoader,
@@ -1031,6 +1037,7 @@ def analyse_compare_rhis_to_radarnet_outputs(case):
     outputs=analyse_compare_rhis_to_radarnet_outputs,
     matrix={'case': conf.CASES},
     depends_on=[compare_rhis_to_radarnet],
+    uses={'output_vn': output_vn},
 )
 def analyse_compare_rhis_to_radarnet(inputs, outputs, case):
     """Analyse compare_rhis_to_radarnet output (RHI-derived vs RadarNet precip).
@@ -1201,6 +1208,7 @@ def analyse_all_compare_rhis_to_radarnet_outputs():
     outputs=analyse_all_compare_rhis_to_radarnet_outputs,
     depends_on=[analyse_compare_rhis_to_radarnet],
     uses={
+        'output_vn': output_vn,
         'annotate_fit_with_line': annotate_fit_with_line,
         'plot_corr_grid': plot_corr_grid,
         'CORR_PLOT_KIND': CORR_PLOT_KIND,
@@ -1289,6 +1297,7 @@ def analyse_all_compare_rhis_to_radarnet(inputs, outputs):
             'simple_track_variant': SIMPLE_TRACK_VARIANTS},
     depends_on=[gather_delta_z_stats],
     uses={
+        'output_vn': output_vn,
         'CHIL_X': CHIL_X,
         'CHIL_Y': CHIL_Y,
         'load_data': load_data,
@@ -1544,6 +1553,7 @@ def analyse_match_rhis_to_storms_outputs(case, simple_track_variant):
     matrix={'case': conf.CASES, 'simple_track_variant': SIMPLE_TRACK_VARIANTS},
     depends_on=[match_rhis_to_storms],
     uses={
+        'output_vn': output_vn,
         'TRACKING_PRECIP_THRESHS': TRACKING_PRECIP_THRESHS,
         'DZ_STATS_FILTERS': DZ_STATS_FILTERS,
         'load_data': load_data,
@@ -1627,6 +1637,7 @@ def analyse_all_match_rhis_to_storms_outputs(simple_track_variant):
     matrix={'simple_track_variant': SIMPLE_TRACK_VARIANTS},
     depends_on=[analyse_match_rhis_to_storms],
     uses={
+        'output_vn': output_vn,
         'TRACKING_PRECIP_THRESHS': TRACKING_PRECIP_THRESHS,
         'DZ_STATS_FILTERS': DZ_STATS_FILTERS,
         'plot_full_corr_matrix': plot_full_corr_matrix,
@@ -1769,7 +1780,7 @@ def display_hdf_schemas_outputs():
     outputs=display_hdf_schemas_outputs,
     depends_on=[find_candidate_delta_z, compare_delta_z_candidates, gather_delta_z_stats,
                 compare_rhis_to_radarnet, match_rhis_to_storms, analyse_match_rhis_to_storms],
-    uses={'DISPLAY_HDF_CASE': DISPLAY_HDF_CASE},
+    uses={'output_vn': output_vn, 'DISPLAY_HDF_CASE': DISPLAY_HDF_CASE},
 )
 def display_hdf_schemas(inputs, outputs):
     """Dump the schema of every other rule's .hdf output as human-readable text.
