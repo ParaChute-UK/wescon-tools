@@ -115,8 +115,8 @@ def find_matches(good_cam_paths, camtime, camaz, good_kep_paths, keptime, kepaz,
 
 class CasePathsMap:
     basedirs = {
-        'kepler': '/gws/nopw/j04/ncas_radar_vol2/cjw/projects/kasbex/kepler/L1/{case}',
-        'camra': '/gws/nopw/j04/ncas_radar_vol2/cjw/projects/kasbex/camra/L1/{case}',
+        'kepler': '/gws/ssde/j25a/ncas_radar/vol2/cjw/projects/kasbex/kepler/L1/{case}',
+        'camra': '/gws/ssde/j25a/ncas_radar/vol2/cjw/projects/kasbex/camra/L1/{case}',
     }
     pathglob = {
         'kepler': 'ncas-mobile-ka-band-radar-1_cao_2025????-??????_rhi_l1_v1.0.0.nc',
