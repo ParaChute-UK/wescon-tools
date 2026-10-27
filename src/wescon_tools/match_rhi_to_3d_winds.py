@@ -86,9 +86,11 @@ class MatchRHIto3dWinds:
         # Construct data needed for interp.
         ee, nn = np.meshgrid(eastings, northings)
         osgb_tx = ccrs.OSGB()
-        pc_tx = ccrs.PlateCarree()
+        # Geodetic (WGS84 ellipsoid), not PlateCarree: PlateCarree's default globe is a sphere, which puts
+        # points ~100 m off in OSGB near Chilbolton.
+        geod_tx = ccrs.Geodetic()
         # Transform all lat/lon points into eastings, northings
-        osgb_x, osgb_y, _ = osgb_tx.transform_points(pc_tx, ds3d.longitude.values.flatten(),
+        osgb_x, osgb_y, _ = osgb_tx.transform_points(geod_tx, ds3d.longitude.values.flatten(),
                                                      ds3d.latitude.values.flatten()).T
         points = np.array(list(zip(osgb_x, osgb_y)))
 

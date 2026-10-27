@@ -14,7 +14,7 @@ KASBEX_OUTPUT_VN = 'v0.1'
 # v12: try to get things running. Messed up dirs so that figs ended up in data dirs.
 # v13: was going to be the release version but contained some serious bugs (thanks claude). Perhaps it was unluck?
 # v14: close to release
-WESCON_RADAR_DEV_OUTPUT_VN = 'v15'
+WESCON_RADAR_DEV_OUTPUT_VN = 'v16'
 
 # Radar geometry / timing constants (shared across wescon_radar_dev rules and the
 # delta_z module). Chilbolton (CAMRa) OSGB eastings/northings (m) and the RadarNet
