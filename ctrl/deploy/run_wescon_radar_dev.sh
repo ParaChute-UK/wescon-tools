@@ -1,11 +1,6 @@
 # Remote script - run on JASMIN.
-# Setup conda. Taken from .bashrc.jasmin.sh
-__conda_setup="$('/home/users/mmuetz/miniforge3/bin/conda' 'shell.bash' 'hook' 2> /dev/null)" 
-eval "$__conda_setup"
-unset __conda_setup
-
-# Activate eng.
-conda activate upflo_env
+# Activate the shared uv env (built by ~/projects/local/radar_env/sync.sh).
+source /home/users/mmuetz/projects/local/radar_env/.venv/bin/activate
 
 # Ensure correct plotting (forces non-interactive I think)
 export MPLBACKEND=agg
