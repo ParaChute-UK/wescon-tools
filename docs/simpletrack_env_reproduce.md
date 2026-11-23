@@ -1,5 +1,9 @@
 # Reproduce the `.venv-simpletrack` dual-tracker environment (for another Claude)
 
+> **Superseded (Nov 2026):** use the shared `~/projects/local/radar_env` (build with its
+> `sync.sh`) instead of `.venv-simpletrack`. `scripts/setup-simpletrack-env.sh` was removed
+> (see git history, commit `1ed6338`). This runbook is kept for reference only.
+
 You are setting up the WesCon storm-tracking environment on a fresh machine.
 The goal is a **single uv venv** (`.venv-simpletrack`) that can import *both*
 simple-track trackers in one interpreter, so the `track_day` remake rule can run

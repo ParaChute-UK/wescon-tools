@@ -1,5 +1,10 @@
 # The `.venv-simpletrack` environment (both trackers side by side)
 
+> **Superseded (Nov 2026):** `.venv-simpletrack` and `scripts/setup-simpletrack-env.sh`
+> have been replaced by the shared `~/projects/local/radar_env` (built with its `sync.sh`),
+> which uses the same `.pth` mechanism described below. The setup script was removed;
+> it is in git history (commit `1ed6338`). Kept for the explanation of the `.pth` trick.
+
 This is the **single environment used to run the remake pipeline** during the
 simple-track → master migration. It hosts *both* storm trackers in one
 interpreter so the `track_day` rule can run its two variants without switching

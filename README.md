@@ -9,19 +9,25 @@ In your favourite Python environment:
 
 `pip install git+https://github.com/ParaChute-UK/wescon-tools.git#egg=wescon-tools`
 
-### Storm-tracking environment (`.venv-simpletrack`)
+### Running the pipelines (`radar_env`)
 
-To run the storm-tracking remake pipeline you need the dedicated uv environment
-that hosts **both** simple-track trackers side by side (`current` + `release`
-variants of the `track_day` rule). Build it reproducibly with:
+On JASMIN, the remake pipelines run in the shared uv environment at
+`~/projects/local/radar_env`, which also serves upflo, kasbex and friends. It
+installs wescon-tools editable and hosts **both** simple-track trackers side by
+side (`simpletrack` from the master checkout, `simple_track` from the current
+branch), as the `track_day` rule's two variants need. Build/update and activate it with:
 
 ```bash
-scripts/setup-simpletrack-env.sh
-source .venv-simpletrack/bin/activate
+~/projects/local/radar_env/sync.sh      # always use this, not a bare `uv sync`
+source ~/projects/local/radar_env/.venv/bin/activate
 ```
 
-See [`docs/simpletrack_env.md`](docs/simpletrack_env.md) for what it contains and
-why it uses a `.pth` trick to run both trackers in one interpreter.
+The deploy scripts in `ctrl/deploy/` activate it. Don't `uv sync`/`uv run` in
+this repo: that builds a separate `.venv` here that lacks `simple_track` (with
+`radar_env` active, use `uv run --active` if you need `uv run`).
+
+See [`docs/simpletrack_env.md`](docs/simpletrack_env.md) for why a `.pth` file
+is needed to run both trackers in one interpreter.
 
 ## Structure
 
