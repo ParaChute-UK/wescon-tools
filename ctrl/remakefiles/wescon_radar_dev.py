@@ -1283,6 +1283,88 @@ def compare_rhis_to_radarnet(inputs, outputs, case):
     )
 
 
+# Off-diagonal mark for the RHI-vs-radar correlation grids: 'scatter' or 'hexbin'.
+CORR_PLOT_KIND = "scatter"
+
+
+def scatter(x, y, **kws):
+    # Off-diagonal scatter for the correlation grids. Strips seaborn's
+    # color/label kwargs and drops NaNs before handing off to ax.scatter.
+    ax = kws.get("ax", plt.gca())
+    mask = x.notna() & y.notna()
+    if mask.sum() == 0:
+        return
+    ax.scatter(x[mask], y[mask], s=15, alpha=0.5)
+
+
+def hexbin(x, y, **kws):
+    # Off-diagonal density plot for the correlation grids. Strips seaborn's
+    # color/label kwargs and drops NaNs before handing off to ax.hexbin.
+    ax = kws.get("ax", plt.gca())
+    mask = x.notna() & y.notna()
+    if mask.sum() == 0:
+        return
+    ax.hexbin(x[mask], y[mask], gridsize=25, mincnt=1, cmap="viridis")
+
+
+def annotate_fit_with_line(x, y, **kws):
+    # clean data
+    ax = kws.get("ax", plt.gca())
+    mask = x.notna() & y.notna()
+    x_clean, y_clean = x[mask], y[mask]
+
+    if len(x_clean) > 1 and x_clean.nunique() > 1:
+        # Calculate linear regression
+        slope, intercept, r, p, stderr = spstats.linregress(x_clean, y_clean)
+
+        # We create two points at the min and max of x to draw the line
+        x_vals = np.array([x_clean.min(), x_clean.max()])
+        y_vals = intercept + slope * x_vals
+        ax.plot(x_vals, y_vals, "r--", lw=2)  # Red dashed line
+
+        is_interesting = (r**2 >= 0.05) and (p <= 0.01)
+        edge_colour = "green" if is_interesting else "none"
+        face_colour = "green" if is_interesting else "white"
+        line_width = 1.5 if is_interesting else 0
+
+        # 5. Annotate text
+        if p < 1e-6:
+            p_str = r"$p \ll 0.001$"
+        elif p < 1e-3:
+            p_str = "$p < 0.001$"
+        else:
+            p_str = f"$p$={p:.2g}"
+        msg = f"slope={slope:.3g}\n$r^2$={r**2:.2f}\n{p_str}"
+        ax.text(
+            0.05,
+            0.9,
+            msg,
+            transform=ax.transAxes,
+            fontsize=10,
+            verticalalignment="top",
+            bbox=dict(
+                boxstyle="round,pad=0.3",
+                fc=face_colour,
+                ec=edge_colour,
+                lw=line_width,
+                alpha=0.5,
+            ),
+        )
+
+
+def plot_corr_grid(df, xcols, ycols):
+    """Build a RHI-vs-radar correlation PairGrid, using the CORR_PLOT_KIND off-diagonal mark."""
+    marks = {"scatter": scatter, "hexbin": hexbin}
+    if CORR_PLOT_KIND not in marks:
+        raise ValueError(
+            f"Unknown CORR_PLOT_KIND: {CORR_PLOT_KIND!r} (expected one of {list(marks)})"
+        )
+    g = sns.PairGrid(df, x_vars=xcols, y_vars=ycols)
+    g.map(marks[CORR_PLOT_KIND])
+    g.map(annotate_fit_with_line)
+    return g
+
+
 def analyse_compare_rhis_to_radarnet_inputs(case):
     inputs = find_candidate_delta_z_outputs(case)
     inputs.update(gather_delta_z_stats_outputs(case))
@@ -1307,7 +1389,7 @@ def analyse_compare_rhis_to_radarnet_outputs(case):
     outputs=analyse_compare_rhis_to_radarnet_outputs,
     matrix={"case": conf.CASES},
     depends_on=[compare_rhis_to_radarnet],
-    uses={"output_vn": output_vn},
+    uses={"output_vn": output_vn, "CORR_PLOT_KIND": CORR_PLOT_KIND, "plot_corr_grid": plot_corr_grid},
 )
 def analyse_compare_rhis_to_radarnet(inputs, outputs, case):
     """Analyse compare_rhis_to_radarnet output (RHI-derived vs RadarNet precip).
@@ -1405,88 +1487,6 @@ def analyse_compare_rhis_to_radarnet(inputs, outputs, case):
         key="analyse_compare_rhis_to_radarnet_stats",
     )
     Path(outputs["fig_dummy"]).touch()
-
-
-# Off-diagonal mark for the RHI-vs-radar correlation grids: 'scatter' or 'hexbin'.
-CORR_PLOT_KIND = "scatter"
-
-
-def scatter(x, y, **kws):
-    # Off-diagonal scatter for the correlation grids. Strips seaborn's
-    # color/label kwargs and drops NaNs before handing off to ax.scatter.
-    ax = kws.get("ax", plt.gca())
-    mask = x.notna() & y.notna()
-    if mask.sum() == 0:
-        return
-    ax.scatter(x[mask], y[mask], s=15, alpha=0.5)
-
-
-def hexbin(x, y, **kws):
-    # Off-diagonal density plot for the correlation grids. Strips seaborn's
-    # color/label kwargs and drops NaNs before handing off to ax.hexbin.
-    ax = kws.get("ax", plt.gca())
-    mask = x.notna() & y.notna()
-    if mask.sum() == 0:
-        return
-    ax.hexbin(x[mask], y[mask], gridsize=25, mincnt=1, cmap="viridis")
-
-
-def annotate_fit_with_line(x, y, **kws):
-    # clean data
-    ax = kws.get("ax", plt.gca())
-    mask = x.notna() & y.notna()
-    x_clean, y_clean = x[mask], y[mask]
-
-    if len(x_clean) > 1 and x_clean.nunique() > 1:
-        # Calculate linear regression
-        slope, intercept, r, p, stderr = spstats.linregress(x_clean, y_clean)
-
-        # We create two points at the min and max of x to draw the line
-        x_vals = np.array([x_clean.min(), x_clean.max()])
-        y_vals = intercept + slope * x_vals
-        ax.plot(x_vals, y_vals, "r--", lw=2)  # Red dashed line
-
-        is_interesting = (r**2 >= 0.05) and (p <= 0.01)
-        edge_colour = "green" if is_interesting else "none"
-        face_colour = "green" if is_interesting else "white"
-        line_width = 1.5 if is_interesting else 0
-
-        # 5. Annotate text
-        if p < 1e-6:
-            p_str = r"$p \ll 0.001$"
-        elif p < 1e-3:
-            p_str = "$p < 0.001$"
-        else:
-            p_str = f"$p$={p:.2g}"
-        msg = f"slope={slope:.3g}\n$r^2$={r**2:.2f}\n{p_str}"
-        ax.text(
-            0.05,
-            0.9,
-            msg,
-            transform=ax.transAxes,
-            fontsize=10,
-            verticalalignment="top",
-            bbox=dict(
-                boxstyle="round,pad=0.3",
-                fc=face_colour,
-                ec=edge_colour,
-                lw=line_width,
-                alpha=0.5,
-            ),
-        )
-
-
-def plot_corr_grid(df, xcols, ycols):
-    """Build a RHI-vs-radar correlation PairGrid, using the CORR_PLOT_KIND off-diagonal mark."""
-    marks = {"scatter": scatter, "hexbin": hexbin}
-    if CORR_PLOT_KIND not in marks:
-        raise ValueError(
-            f"Unknown CORR_PLOT_KIND: {CORR_PLOT_KIND!r} (expected one of {list(marks)})"
-        )
-    g = sns.PairGrid(df, x_vars=xcols, y_vars=ycols)
-    g.map(marks[CORR_PLOT_KIND])
-    g.map(annotate_fit_with_line)
-    return g
 
 
 def analyse_all_compare_rhis_to_radarnet_inputs():
