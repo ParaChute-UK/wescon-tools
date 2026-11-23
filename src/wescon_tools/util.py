@@ -8,8 +8,6 @@ import pandas as pd
 import remake
 from remake.util import util
 
-PRODUCTION = False
-
 
 def to_netcdf_tmp_then_copy(ds, outpath, encoding=None):
     """Helper to write output to a JASMIN scratch dir, then copy to desired location.
@@ -34,9 +32,9 @@ def to_netcdf_tmp_then_copy(ds, outpath, encoding=None):
     stack = next(traceback.walk_stack(None))
     frame = stack[0]
     calling_file = frame.f_globals['__file__']
-    calling_obj = frame.f_locals['self']
-    calling_obj_doc = calling_obj.__doc__
-    calling_class_name = calling_obj.__class__.__name__
+    # calling_obj = frame.f_locals['self']
+    # calling_obj_doc = calling_obj.__doc__
+    # calling_class_name = calling_obj.__class__.__name__
     if outpath.name.startswith('.remake.tmp'):
         output_path_actual = util.tmp_to_actual_path(outpath)
     else:
@@ -46,27 +44,18 @@ def to_netcdf_tmp_then_copy(ds, outpath, encoding=None):
     remake_version = remake.__version__
 
     metadata_attrs = {
-        'created by': f'{calling_file}: {calling_class_name}',
+        'created by': f'{calling_file}',
         'calling file source': Path(calling_file).read_text(),
-        'project repository': 'https://github.com/markmuetz/MCS_PRIME',
+        'project repository': 'https://github.com/ParaChute-UK/wescon-tools',
         f'remake version': remake_version,
         'remake repository': 'https://github.com/markmuetz/remake',
-        f'task': f'{calling_obj}',
-        f'task doc': f'{calling_obj_doc}',
+        # f'task': f'{calling_obj}',
+        # f'task doc': f'{calling_obj_doc}',
         'created on': str(pd.Timestamp.now()),
         'nodename': nodename,
         'output path': str(output_path_actual),
         'contact': 'mark.muetzelfeldt@reading.ac.uk',
     }
-    if PRODUCTION:
-        metadata_attrs.update({
-            'production_mcs_prime_git_info': str(mcs_prime_git_info),
-            'production_remake_git_info': str(remake_git_info),
-            'production_conda_env_details': conda_env_details,
-            'production_machine_lspcu': machine_lspcu,
-            'production_machine_lsb_release': machine_lsb_release,
-            'production_machine_uname': machine_uname,
-        })
     ds.attrs.update(metadata_attrs)
 
     ds.to_netcdf(tmppath, encoding=encoding)

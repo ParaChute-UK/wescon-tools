@@ -16,7 +16,7 @@ maintainers = [
     { name = "Mark Muetzelfeldt", email = "mark.muetzelfeldt@reading.ac.uk" },
     { name = "Brian Lo", email = "chunhaybrian.lo@reading.ac.uk" }
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = "MIT"
 license-files = ['LICENSE']
 readme = "README.md"
@@ -30,26 +30,50 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Atmospheric Science"
 ]
 dependencies = [
-    "cartopy>=0.24.1",
+    "cartopy>=0.26",
     "ipdb>=0.13.13",
     "loguru>=0.7.3",
     "matplotlib>=3.10.3",
+    "netcdf4>=1.7.2",
     "numpy>=2.2.6",
     "pandas>=2.2.3",
     "pyquerylist>=0.4.0",
+    "remake",
     "scikit-image>=0.25.2",
     "scipy>=1.15.3",
+    "seaborn>=0.13.2",
+    "simple-track",
+    "statsmodels>=0.14.5",
+    "tables>=3.10.2",
     "xarray>=2025.4.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "pytest-xdist>=3.6",
 ]
 
 [project.urls]
 Homepage = "https://github.com/markmuetz/wescon-tools"
 
-[tool.uv.workspace]
-members = ["wescon-tools"]
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# [tool.uv.workspace]
+# members = ["wescon-tools"]
 
 # [project.scripts]
 
 # [tool.setuptools]
 # packages = ["wescon_tools"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "ctrl/remakefiles", "tests"]
+testpaths = ["tests"]
+
+[tool.uv.sources]
+remake = { path = "../remake", editable = true }
+simple-track = { path = "../simple-track-master", editable = true }
 

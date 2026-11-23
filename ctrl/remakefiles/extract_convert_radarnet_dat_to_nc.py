@@ -1,0 +1,100 @@
+"""Extract and convert RadarNet data from its orig file format to netCDF.
+
+Originally from wescon_conv_init: https://github.com/markmuetz/wescon_conv_init
+Then from USM: https://github.com/markmuetz/usm
+Must be run on JASMIN to access /badc/ukmo-nimrod/data/composite/uk-1km/"""
+
+import os
+from pathlib import Path
+import shutil
+
+from remake import Remake, rule
+from remake.util import sysrun
+
+from wescon_tools.radarnet_composite import RadarNetComposite, RadarNetDataReadError
+from wescon_tools import util
+from wescon_tools.proj_config import PATHS, CASES, KASBEX_CASES
+
+# Access has been suspended. I can still download each file through the web interface tho ¯\_(ツ)_/¯
+BADC_DATADIR = Path('/badc/ukmo-nimrod/data/composite/uk-1km/')
+OUTDIR = PATHS['datadir'] / 'remake3' / 'radarnet'
+
+slurm_config = {'account': 'afesp', 'partition': 'standard', 'qos': 'standard', 'mem': 64000}
+rmk = Remake(config=dict(slurm=slurm_config))
+
+
+def tar_inputs(case):
+    year = case[:4]
+    badc_year_dir = BADC_DATADIR / f'{year}'
+    tar_file_glob = f'metoffice-c-band-rain-radar_uk_{case}_1km-composite.dat.gz.tar'
+    return sorted(badc_year_dir.glob(tar_file_glob))
+
+
+@rule(
+    outputs={'out_log': str(OUTDIR / '{case}' / 'metoffice-c-band-rain-radar_uk_{case}.log')},
+    matrix={'case': CASES + KASBEX_CASES},
+    uses={
+        'tar_inputs': tar_inputs,
+        'OUTDIR': OUTDIR,
+        'RadarNetComposite': RadarNetComposite,
+        'RadarNetDataReadError': RadarNetDataReadError,
+        'sysrun': sysrun,
+    },
+)
+def extract_convert_radarnet(outputs, case):
+    tar_paths = tar_inputs(case)
+    print(tar_paths)
+    datestr = case
+
+    nimrod_errors = []
+    tmpdir = Path('/work/scratch-nopw2') / 'mmuetz' / 'upflo' / 'nimrod'
+    for inputpath in tar_paths:
+        print(datestr)
+        # N.B. this is a date, e.g. 20050601
+        output = (
+            OUTDIR / f'{case[:4]}' / f'{case[4:6]}' / f'{case[6:]}' / f'metoffice-c-band-rain-radar_uk_{datestr}.nc'
+        )
+        print(output)
+        output.parent.mkdir(exist_ok=True, parents=True)
+
+        # Set up dir for intermediate files.
+        orig_dir = os.getcwd()
+        outdir = tmpdir / datestr[:4] / datestr[4:]
+
+        outdir.mkdir(exist_ok=True, parents=True)
+        os.chdir(outdir)
+
+        # untar and unzip .gz.tar files (this deletes the .gz, and creates .dat).
+        sysrun(f'tar xf {inputpath}')
+        sysrun('gunzip *.gz')
+
+        # Load the RadarNet files for datestr (year, month, day)
+        fileglob = f'metoffice-c-band-rain-radar_uk_{datestr}????_1km-composite.dat'
+        print(fileglob)
+        if not len(list(Path.cwd().glob(fileglob))):
+            print(f'No files for {fileglob}')
+            continue
+        try:
+            nim_comp = RadarNetComposite(fileglob)
+            nimrod_errors.extend(nim_comp.errors)
+        except RadarNetDataReadError as ndre:
+            print(f'Read error for {fileglob}: {ndre}')
+            nimrod_errors.append(ndre)
+            continue
+        finally:
+            # Clear up dat files.
+            datfiles = sorted(Path.cwd().glob(fileglob))
+            for datfile in datfiles:
+                datfile.unlink()
+            shutil.rmtree(outdir)
+            os.chdir(orig_dir)
+
+        da_rain = nim_comp.to_xarray()
+        # Save to nc.
+        encoding = {'rain': {'dtype': 'int16', 'scale_factor': 1.0 / 32, '_FillValue': -999, 'zlib': True}}
+        util.to_netcdf_tmp_then_copy(da_rain, output, encoding=encoding)
+        os.chdir(orig_dir)
+    Path(outputs['out_log']).write_text('\n'.join([str(e) for e in nimrod_errors]) + '\n')
+
+
+rmk.rules_from_current_module()

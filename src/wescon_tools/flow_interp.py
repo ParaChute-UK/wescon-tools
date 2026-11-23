@@ -113,7 +113,8 @@ class FlowInterp:
 
     def _apply_physical_constraints(self):
         # TODO: would be better to to this as a multiple of the grid-mean flow speed?
-        constraint = (self.flow_vec[1]**2 + self.flow_vec[0]**2) * self.dx / self.dt > self.max_flow_speed**2
+        # Flow speed in m/s is |flow_vec| (grid cells per frame) * dx / dt.
+        constraint = (self.flow_vec[1]**2 + self.flow_vec[0]**2) * (self.dx / self.dt)**2 > self.max_flow_speed**2
         self.flow_vec[1][constraint] = np.nan
         self.flow_vec[0][constraint] = np.nan
         self.flow_vec[1] = fill_nan_local_mean(self.flow_vec[1])

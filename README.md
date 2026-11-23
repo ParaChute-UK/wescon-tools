@@ -9,6 +9,20 @@ In your favourite Python environment:
 
 `pip install git+https://github.com/ParaChute-UK/wescon-tools.git#egg=wescon-tools`
 
+### Storm-tracking environment (`.venv-simpletrack`)
+
+To run the storm-tracking remake pipeline you need the dedicated uv environment
+that hosts **both** simple-track trackers side by side (`current` + `release`
+variants of the `track_day` rule). Build it reproducibly with:
+
+```bash
+scripts/setup-simpletrack-env.sh
+source .venv-simpletrack/bin/activate
+```
+
+See [`docs/simpletrack_env.md`](docs/simpletrack_env.md) for what it contains and
+why it uses a `.pth` trick to run both trackers in one interpreter.
+
 ## Structure
 
 Module code is located in `src/wescon-tools`. This includes useful packages containing classes and utility functions.
