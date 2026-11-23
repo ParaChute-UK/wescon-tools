@@ -1388,7 +1388,7 @@ def analyse_compare_rhis_to_radarnet_outputs(case):
     inputs=analyse_compare_rhis_to_radarnet_inputs,
     outputs=analyse_compare_rhis_to_radarnet_outputs,
     matrix={"case": conf.CASES},
-    depends_on=[compare_rhis_to_radarnet],
+    depends_on=[find_candidate_delta_z, gather_delta_z_stats, compare_rhis_to_radarnet],
     uses={"output_vn": output_vn, "CORR_PLOT_KIND": CORR_PLOT_KIND, "plot_corr_grid": plot_corr_grid},
 )
 def analyse_compare_rhis_to_radarnet(inputs, outputs, case):
@@ -1974,7 +1974,7 @@ def analyse_match_rhis_to_storms_outputs(case, simple_track_variant):
     inputs=analyse_match_rhis_to_storms_inputs,
     outputs=analyse_match_rhis_to_storms_outputs,
     matrix={"case": conf.CASES, "simple_track_variant": SIMPLE_TRACK_VARIANTS},
-    depends_on=[match_rhis_to_storms],
+    depends_on=[find_candidate_delta_z, gather_delta_z_stats, match_rhis_to_storms],
     uses={
         "output_vn": output_vn,
         "TRACKING_PRECIP_THRESHS": TRACKING_PRECIP_THRESHS,
