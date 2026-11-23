@@ -1227,7 +1227,7 @@ def compare_rhis_to_radarnet_outputs(case):
     outputs=compare_rhis_to_radarnet_outputs,
     matrix={"case": conf.CASES},
     # 'dZ_stats_filters': ['all_cloud', 'high_cloud'],
-    depends_on=[gather_delta_z_stats],
+    depends_on=[find_candidate_delta_z, gather_delta_z_stats],
     uses={
         "output_vn": output_vn,
         "CHIL_X": CHIL_X,
@@ -1603,7 +1603,7 @@ def analyse_all_compare_rhis_to_radarnet(inputs, outputs):
         "dZ_stats_filters": DZ_STATS_FILTERS,
         "simple_track_variant": SIMPLE_TRACK_VARIANTS,
     },
-    depends_on=[gather_delta_z_stats],
+    depends_on=[find_candidate_delta_z, gather_delta_z_stats],
     uses={
         "output_vn": output_vn,
         "CHIL_X": CHIL_X,
