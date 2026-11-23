@@ -4,7 +4,7 @@ from remake import Remake, rule
 from simple_track import nimrod_user_functions
 from simple_track.storm_track import StormTracker
 
-from wescon_tools.proj_config import CASES, KASBEX_CASES, PATHS
+from wescon_tools.proj_config import CASES, KASBEX_CASES, PATHS, simple_track_outdir
 from wescon_tools.simpletrack_adapter import track_day_to_files
 
 slurm_config = {
@@ -17,13 +17,9 @@ rmk = Remake(config=dict(slurm=slurm_config))
 
 # Two producers kept side by side so master/release results can be compared
 # scientifically against the current branch before switching over. The variant
-# selects both the output subdir and the code path:
+# selects both the output subdir (proj_config.simple_track_outdir) and the code path:
 #   'current' -> simple_track          (StormTracker, mm_classes_and_pip_installable)
 #   'release' -> simple_track_release  (simpletrack master adapter)
-VARIANT_OUTDIR = {
-    "current": PATHS["outdir"] / "simple_track",
-    "release": PATHS["outdir"] / "simple_track_release",
-}
 
 
 def track_day_inputs(
@@ -48,7 +44,7 @@ def track_day_outputs(
     month = case[4:6]
     day = case[6:8]
 
-    outdir = VARIANT_OUTDIR[simple_track_variant]
+    outdir = simple_track_outdir(simple_track_variant)
     return {
         "dummy": str(
             outdir / f"{year}/{month}/{day}/"
@@ -66,7 +62,11 @@ def track_day_outputs(
         "tracking_precip_thresh": [1.0, 3.0, 5.0],
         "simple_track_variant": ["current", "release"],
     },
-    uses={"StormTracker": StormTracker, "track_day_to_files": track_day_to_files},
+    uses={
+        "StormTracker": StormTracker,
+        "track_day_to_files": track_day_to_files,
+        "simple_track_outdir": simple_track_outdir,
+    },
 )
 def track_day(
     inputs, outputs, case, tracking_method, tracking_precip_thresh, simple_track_variant

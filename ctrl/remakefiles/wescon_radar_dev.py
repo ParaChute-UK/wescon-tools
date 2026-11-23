@@ -94,12 +94,11 @@ FIELD_NAME_MAP = {
 
 # Storm-tracking producer variants, mirroring ctrl/remakefiles/simple_tracking.py.
 # Each variant writes its storm_data_*.hdf / storm_labels_*.nc into its own subdir
-# of PATHS['outdir'], so the rhi<->storm analysis can be run side by side against
+# (conf.simple_track_outdir), so the rhi<->storm analysis can be run side by side against
 # both trackers and compared scientifically:
 #   'current' -> simple_track          (StormTracker, mm_classes_and_pip_installable)
 #   'release' -> simple_track_release  (simpletrack master adapter)
 SIMPLE_TRACK_VARIANTS = ["current", "release"]
-VARIANT_SUBDIR = {"current": "simple_track", "release": "simple_track_release"}
 
 # Analysis sweep axes. Used both as matrix dimensions (match_rhis_to_storms) and as
 # loop ranges in the downstream analyse_* rules -- keep them here so the matrix and
@@ -1049,8 +1048,7 @@ def load_data(case, inputs, tracking_precip_thresh, simple_track_variant):
 
     # Select the storm-tracking producer variant ('current' vs 'release' tracker).
     year, month, day = int(case[:4]), int(case[4:6]), int(case[6:])
-    subdir = VARIANT_SUBDIR[simple_track_variant]
-    dirpath = conf.PATHS["outdir"] / f"{subdir}/{year}/{month:02d}/{day:02d}/"
+    dirpath = conf.simple_track_outdir(simple_track_variant) / f"{year}/{month:02d}/{day:02d}/"
     path = list(
         dirpath.glob(f"storm_labels_*.precip_thresh_{tracking_precip_thresh}.nc")
     )[0]

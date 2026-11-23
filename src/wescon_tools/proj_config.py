@@ -14,7 +14,10 @@ KASBEX_OUTPUT_VN = 'v0.1'
 # v12: try to get things running. Messed up dirs so that figs ended up in data dirs.
 # v13: was going to be the release version but contained some serious bugs (thanks claude). Perhaps it was unluck?
 # v14: close to release
-WESCON_RADAR_DEV_OUTPUT_VN = 'v16'
+# v15: output_vn tracked in every rule's uses=.
+# v16: Geodetic (not PlateCarree) for 3D-wind lat/lon -> OSGB.
+# v17: new simple-track (master) and remake 0.11.0.dev0 soak; tracking outputs now versioned too.
+WESCON_RADAR_DEV_OUTPUT_VN = 'v17'
 
 # Radar geometry / timing constants (shared across wescon_radar_dev rules and the
 # delta_z module). Chilbolton (CAMRa) OSGB eastings/northings (m) and the RadarNet
@@ -50,6 +53,17 @@ def deltaZ_outdir(case):
 def deltaZ_figdir(case):
     """Figure dir for the deltaZ-candidate analysis of a single case (or 'all')."""
     return PATHS['figdir'] / 'wescon_radar_dev' / WESCON_RADAR_DEV_OUTPUT_VN / case / 'camra' / 'deltaZ_candidate'
+
+
+def simple_track_outdir(variant):
+    """Output dir for the storm tracking (simple_tracking.track_day) of one variant.
+
+    'current' -> simple_track (StormTracker, mm_classes_and_pip_installable branch);
+    'release' -> simple_track_release (simpletrack master, via simpletrack_adapter).
+    Versioned with WESCON_RADAR_DEV_OUTPUT_VN, as wescon_radar_dev reads the tracks from here.
+    """
+    subdir = {'current': 'simple_track', 'release': 'simple_track_release'}[variant]
+    return PATHS['outdir'] / subdir / WESCON_RADAR_DEV_OUTPUT_VN
 
 
 def radarnet_path(case):
